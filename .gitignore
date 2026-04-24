@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# Environments
+.env
+.venv
+
+# Notebook stuff
+.ipynb_checkpoints/
+
+# Misc
+.idea/
