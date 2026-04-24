@@ -13,4 +13,13 @@
 
 - Joker Ausgabezahlen auf die Bewertungen von Gerichten matchen und versuchen einen Nachfragetrend daraus abzuleiten
 
+## Vali:
+- Vorlesungszeit vs. Vorlesungsfreie Zeit (+ Klausurenphase?)
+- Wochentag Buckets
+- Joker Ausgabezahlen auf die Bewertungen von Gerichten matchen und versuchen einen Nachfragetrend daraus abzuleiten
+
+## Tony:
+- Wetter
+- ÖPNV Situation -> bekommen wir da gute Daten?
+
 # Feature Engineering Ideen
