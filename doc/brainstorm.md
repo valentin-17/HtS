@@ -16,6 +16,7 @@
 ## Vali:
 - Vorlesungszeit vs. Vorlesungsfreie Zeit (+ Klausurenphase?)
 - Wochentag Buckets
+- Saisonale Buckets
 - Joker Ausgabezahlen auf die Bewertungen von Gerichten matchen und versuchen einen Nachfragetrend daraus abzuleiten
 
 ## Tony:

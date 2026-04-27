@@ -13,4 +13,7 @@
 - Sind die Produktionsdaten (Spalte 'Ausgabe') das, was tatsächlich an Gäste ausgegeben wurde? Oder sind das die Gerichte die von der Mensa produziert / geplant wurden?
   - Über die Anzahl an tatsächlich an Gäste ausgegebene Gerichte lässt sich die Anzahl an erwarteten Gästen abschätzen.
 - Können wir den Veranstaltungskalender der Uni (https://www.uni-trier.de/universitaet/news/veranstaltungskalender) als csv/excel dump mit allen Metadaten so wie sie auf der Website angezeigt werden bekommen?
+- Ist es möglich Informationen über vorzeitig ausverkaufte Gerichte zu bekommen? Bsp.: Tag: Dienstag, Rezeptur: Gemüselasagne, Ausgabe: 500, vor Schluss der Mensa ausverkauft: Ja.
+- Ist es möglich weitere Attribute zu Rezepturen zu bekommen? (Bsp.: Vegetarisch, Vegan, Fisch, Fleisch)
+- Idealerweise können wir Angebot von tatsächlich verkauften Gerichten unterscheiden. Bsp.: Gericht: Gemüselasagne, Angebot: 500, realisiert: 350 (realisiert dürfte bereits in der Spalte 'Ausgabe' vorliegen, korrekt?)
 - 
