@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any
 
 import holidays
@@ -34,11 +35,13 @@ SCHEDULE_TYPE_COL = "event_type"
 SCHEDULE_REGISTERED_COL = "registered_students"
 
 MEAL_PLAN_DATE_COL = "date"
+MEAL_PLAN_LOCATION_COL = "location"
 MEAL_PLAN_CATEGORY_COL = "meal_category"
 MEAL_PLAN_DISH_COL = "dish_name"
 MEAL_PLAN_RECIPE_COL = "recipe_id"
 
 WASTE_DATE_COL = "date"
+WASTE_LOCATION_COL = "location"
 WASTE_INGREDIENT_COL = "ingredient_name"
 WASTE_UNIT_COL = "unit"
 WASTE_QUANTITY_COL = "waste_quantity"
@@ -129,7 +132,6 @@ class ExtendedDemandExploration:
     daily_schedule_load: pl.DataFrame | None = None
     schedule_sales_effect: pl.DataFrame | None = None
     category_schedule_effect: pl.DataFrame | None = None
-    menu_popularity: pl.DataFrame | None = None
     daily_menu_mix: pl.DataFrame | None = None
     daily_waste: pl.DataFrame | None = None
     ingredient_unit_waste: pl.DataFrame | None = None
@@ -387,6 +389,7 @@ def normalize_meal_plan_frame(meal_plan: pl.DataFrame) -> pl.DataFrame:
     Expected input schema:
 
         date: date-like service day
+        location: tarforst or oliva
         meal_category: category matching sales where possible, e.g. "Menu 1"
         dish_name: displayed dish name
         recipe_id: recipe identifier; nullable if no recipe match is available
@@ -404,6 +407,7 @@ def normalize_meal_plan_frame(meal_plan: pl.DataFrame) -> pl.DataFrame:
         meal_plan,
         {
             MEAL_PLAN_DATE_COL,
+            MEAL_PLAN_LOCATION_COL,
             MEAL_PLAN_CATEGORY_COL,
             MEAL_PLAN_DISH_COL,
             MEAL_PLAN_RECIPE_COL,
@@ -412,6 +416,7 @@ def normalize_meal_plan_frame(meal_plan: pl.DataFrame) -> pl.DataFrame:
     )
     return meal_plan.with_columns(
         pl.col(MEAL_PLAN_DATE_COL).cast(pl.Date),
+        pl.col(MEAL_PLAN_LOCATION_COL).cast(pl.Utf8),
         pl.col(MEAL_PLAN_CATEGORY_COL).cast(pl.Utf8),
         pl.col(MEAL_PLAN_DISH_COL).cast(pl.Utf8),
         pl.col(MEAL_PLAN_RECIPE_COL).cast(pl.Utf8),
@@ -424,19 +429,21 @@ def normalize_waste_frame(waste: pl.DataFrame) -> pl.DataFrame:
     Expected input schema:
 
         date: date-like waste recording day
+        location: waste processing location, for example "Mensa Tarforst"
         ingredient_name: canonical ingredient label after your own cleaning
         unit: one of "liter", "kilogram", "portion", "piece"
         waste_quantity: numeric waste amount in the stated unit
 
     Important: this module never converts units. All waste summaries group by
-    (ingredient_name, unit), so "tomato / kilogram" and "tomato / piece" remain
-    separate measurement series.
+    (location, ingredient_name, unit), so locations and measurement series stay
+    separate.
     """
 
     validate_columns(
         waste,
         {
             WASTE_DATE_COL,
+            WASTE_LOCATION_COL,
             WASTE_INGREDIENT_COL,
             WASTE_UNIT_COL,
             WASTE_QUANTITY_COL,
@@ -445,6 +452,7 @@ def normalize_waste_frame(waste: pl.DataFrame) -> pl.DataFrame:
     )
     return waste.with_columns(
         pl.col(WASTE_DATE_COL).cast(pl.Date),
+        pl.col(WASTE_LOCATION_COL).cast(pl.Utf8),
         pl.col(WASTE_INGREDIENT_COL).cast(pl.Utf8),
         pl.col(WASTE_UNIT_COL).cast(pl.Utf8),
         pl.col(WASTE_QUANTITY_COL).cast(pl.Float64),
@@ -645,32 +653,59 @@ def compute_total_sales_analysis(
 def run_total_sales_analysis(
     sales: pl.DataFrame,
     *,
+    schedule: pl.DataFrame | None = None,
+    meal_plan: pl.DataFrame | None = None,
+    waste: pl.DataFrame | None = None,
+    recipes: pl.DataFrame | None = None,
     show_plots: bool = True,
+    output_dir: str | Path = "../../plots",
+    dpi: int = 300,
     **calendar_kwargs: Any,
-) -> TotalSalesAnalysis:
-    """Compute total-sales analysis and optionally display all plots."""
+) -> ExtendedDemandExploration:
+    """Run the full exploratory analysis and save every available plot.
 
-    analysis = compute_total_sales_analysis(sales, **calendar_kwargs)
+    Required input:
+
+        sales: see normalize_sales_frame()
+
+    Optional prepared NDA tables:
+
+        schedule: see normalize_schedule_frame()
+        meal_plan: see normalize_meal_plan_frame()
+        waste: see normalize_waste_frame()
+        recipes: see normalize_recipe_frame()
+
+    The function is intentionally tolerant of missing optional tables. With only
+    sales available, it computes and saves the baseline total-sales plots. As
+    additional tables are supplied, it adds schedule, menu, waste, and recipe
+    bridge plots to the same output directory.
+
+    The historical ``show_plots`` parameter now controls whether plots are
+    written to disk. It is kept to avoid breaking existing notebooks.
+    """
+
+    exploration = compute_extended_demand_exploration(
+        sales,
+        schedule=schedule,
+        meal_plan=meal_plan,
+        waste=waste,
+        recipes=recipes,
+        **calendar_kwargs,
+    )
 
     if show_plots:
         import matplotlib.pyplot as plt
 
-        from .exploratory_plots import plot_total_sales_analysis
+        from .exploratory_plots import named_extended_demand_exploration_plots
 
-        figures = plot_total_sales_analysis(analysis)
+        plot_directory = Path(output_dir)
+        plot_directory.mkdir(parents=True, exist_ok=True)
 
-        filenames = [
-            "total_demand_over_time.png",
-            "calendar_effects.png",
-            "weekday_lecture_vs_free.png",
-            "category_share.png",
-        ]
-
-        for fig, name in zip(figures, filenames):
-            fig.savefig('../../plots/' + name, dpi=300)
+        for name, fig in named_extended_demand_exploration_plots(exploration):
+            fig.savefig(plot_directory / name, dpi=dpi)
             plt.close(fig)
 
-    return analysis
+    return exploration
 
 
 def build_daily_schedule_load(schedule: pl.DataFrame) -> pl.DataFrame:
@@ -780,35 +815,6 @@ def compute_category_schedule_effect(
     )
 
 
-def compute_menu_popularity(sales: pl.DataFrame, meal_plan: pl.DataFrame) -> pl.DataFrame:
-    """Rank dishes by observed demand when offered.
-
-    This assumes sales.meal_category and meal_plan.meal_category are compatible.
-    If sales.name already equals the dish label, this join acts as a consistency
-    check; if sales only has category-level counts, this estimates dish/category
-    demand from the planned dish in that category.
-    """
-
-    normalized_sales = normalize_sales_frame(sales)
-    normalized_meal_plan = normalize_meal_plan_frame(meal_plan)
-    return (
-        normalized_sales.join(
-            normalized_meal_plan,
-            left_on=[SALES_DATE_COL, SALES_CATEGORY_COL],
-            right_on=[MEAL_PLAN_DATE_COL, MEAL_PLAN_CATEGORY_COL],
-            how="inner",
-        )
-        .group_by(MEAL_PLAN_DISH_COL, SALES_CATEGORY_COL, MEAL_PLAN_RECIPE_COL)
-        .agg(
-            pl.len().alias("offered_days"),
-            pl.sum(SALES_COUNT_COL).alias("total_sales"),
-            pl.mean(SALES_COUNT_COL).alias("avg_sales_when_offered"),
-            pl.median(SALES_COUNT_COL).alias("median_sales_when_offered"),
-        )
-        .sort("avg_sales_when_offered", descending=True)
-    )
-
-
 def build_daily_menu_mix(meal_plan: pl.DataFrame) -> pl.DataFrame:
     """Aggregate meal-plan rows into daily offer-count features."""
 
@@ -829,17 +835,22 @@ def build_daily_waste(waste: pl.DataFrame) -> pl.DataFrame:
 
     normalized_waste = normalize_waste_frame(waste)
     return (
-        normalized_waste.group_by(WASTE_DATE_COL, WASTE_INGREDIENT_COL, WASTE_UNIT_COL)
+        normalized_waste.group_by(
+            WASTE_DATE_COL,
+            WASTE_LOCATION_COL,
+            WASTE_INGREDIENT_COL,
+            WASTE_UNIT_COL,
+        )
         .agg(pl.sum(WASTE_QUANTITY_COL).alias("daily_waste_quantity"))
-        .sort(WASTE_DATE_COL, WASTE_INGREDIENT_COL, WASTE_UNIT_COL)
+        .sort(WASTE_DATE_COL, WASTE_LOCATION_COL, WASTE_INGREDIENT_COL, WASTE_UNIT_COL)
     )
 
 
 def summarize_ingredient_unit_waste(daily_waste: pl.DataFrame) -> pl.DataFrame:
-    """Rank waste series by ingredient and unit without unit conversion."""
+    """Rank waste series by location, ingredient, and unit without unit conversion."""
 
     return (
-        daily_waste.group_by(WASTE_INGREDIENT_COL, WASTE_UNIT_COL)
+        daily_waste.group_by(WASTE_LOCATION_COL, WASTE_INGREDIENT_COL, WASTE_UNIT_COL)
         .agg(
             pl.len().alias("waste_recorded_days"),
             pl.sum("daily_waste_quantity").alias("total_waste_quantity"),
@@ -847,7 +858,7 @@ def summarize_ingredient_unit_waste(daily_waste: pl.DataFrame) -> pl.DataFrame:
             pl.median("daily_waste_quantity").alias("median_daily_waste_quantity"),
             pl.std("daily_waste_quantity").alias("std_daily_waste_quantity"),
         )
-        .sort(["unit", "total_waste_quantity"], descending=[False, True])
+        .sort([WASTE_LOCATION_COL, WASTE_UNIT_COL, "total_waste_quantity"], descending=[False, False, True])
     )
 
 
@@ -862,6 +873,7 @@ def compute_waste_calendar_effect(daily_waste: pl.DataFrame, calendar: pl.DataFr
         return pl.DataFrame(
             schema={
                 WASTE_INGREDIENT_COL: pl.Utf8,
+                WASTE_LOCATION_COL: pl.Utf8,
                 WASTE_UNIT_COL: pl.Utf8,
                 "weekday": pl.Utf8,
                 "academic_bucket": pl.Utf8,
@@ -873,27 +885,34 @@ def compute_waste_calendar_effect(daily_waste: pl.DataFrame, calendar: pl.DataFr
             }
         )
 
-    bounds = daily_waste.select(
-        min_date=pl.min(WASTE_DATE_COL),
-        max_date=pl.max(WASTE_DATE_COL),
-    ).row(0, named=True)
-    service_days = (
-        calendar.filter(
-            pl.col("is_regular_service_day")
-            & pl.col("day").is_between(bounds["min_date"], bounds["max_date"], closed="both")
+    location_bounds = (
+        daily_waste.group_by(WASTE_LOCATION_COL)
+        .agg(
+            pl.min(WASTE_DATE_COL).alias("min_date"),
+            pl.max(WASTE_DATE_COL).alias("max_date"),
         )
+    )
+    location_service_days = (
+        calendar.filter(pl.col("is_regular_service_day"))
         .select(
             pl.col("day").alias(WASTE_DATE_COL),
             "weekday",
             "academic_bucket",
         )
+        .join(location_bounds, how="cross")
+        .filter(pl.col(WASTE_DATE_COL).is_between(pl.col("min_date"), pl.col("max_date"), closed="both"))
+        .drop("min_date", "max_date")
     )
-    ingredient_units = daily_waste.select(WASTE_INGREDIENT_COL, WASTE_UNIT_COL).unique()
+    location_ingredient_units = daily_waste.select(
+        WASTE_LOCATION_COL,
+        WASTE_INGREDIENT_COL,
+        WASTE_UNIT_COL,
+    ).unique()
     full_waste_grid = (
-        service_days.join(ingredient_units, how="cross")
+        location_service_days.join(location_ingredient_units, on=WASTE_LOCATION_COL, how="inner")
         .join(
             daily_waste,
-            on=[WASTE_DATE_COL, WASTE_INGREDIENT_COL, WASTE_UNIT_COL],
+            on=[WASTE_DATE_COL, WASTE_LOCATION_COL, WASTE_INGREDIENT_COL, WASTE_UNIT_COL],
             how="left",
         )
         .with_columns(pl.col("daily_waste_quantity").fill_null(0))
@@ -901,7 +920,7 @@ def compute_waste_calendar_effect(daily_waste: pl.DataFrame, calendar: pl.DataFr
 
     return (
         full_waste_grid
-        .group_by(WASTE_INGREDIENT_COL, WASTE_UNIT_COL, "weekday", "academic_bucket")
+        .group_by(WASTE_LOCATION_COL, WASTE_INGREDIENT_COL, WASTE_UNIT_COL, "weekday", "academic_bucket")
         .agg(
             pl.len().alias("service_days"),
             pl.mean("daily_waste_quantity").alias("avg_waste_quantity"),
@@ -909,7 +928,7 @@ def compute_waste_calendar_effect(daily_waste: pl.DataFrame, calendar: pl.DataFr
             pl.col("daily_waste_quantity").quantile(0.25).alias("q25_waste_quantity"),
             pl.col("daily_waste_quantity").quantile(0.75).alias("q75_waste_quantity"),
         )
-        .sort(WASTE_INGREDIENT_COL, WASTE_UNIT_COL, "academic_bucket", "weekday")
+        .sort(WASTE_LOCATION_COL, WASTE_INGREDIENT_COL, WASTE_UNIT_COL, "academic_bucket", "weekday")
     )
 
 
@@ -925,79 +944,77 @@ def build_recipe_ingredient_exposure(meal_plan: pl.DataFrame, recipes: pl.DataFr
     normalized_recipes = normalize_recipe_frame(recipes)
     return (
         normalized_meal_plan.join(normalized_recipes, on=MEAL_PLAN_RECIPE_COL, how="inner")
-        .group_by(MEAL_PLAN_DATE_COL, RECIPE_INGREDIENT_COL, RECIPE_UNIT_COL)
+        .group_by(MEAL_PLAN_DATE_COL, MEAL_PLAN_LOCATION_COL, RECIPE_INGREDIENT_COL, RECIPE_UNIT_COL)
         .agg(
             pl.n_unique(MEAL_PLAN_RECIPE_COL).alias("planned_recipe_count"),
             pl.sum(RECIPE_AMOUNT_COL).alias("raw_recipe_amount_exposure"),
         )
-        .sort(MEAL_PLAN_DATE_COL, RECIPE_INGREDIENT_COL, RECIPE_UNIT_COL)
+        .sort(MEAL_PLAN_DATE_COL, MEAL_PLAN_LOCATION_COL, RECIPE_INGREDIENT_COL, RECIPE_UNIT_COL)
     )
 
 
 def compare_waste_when_ingredient_planned(
     daily_waste: pl.DataFrame,
     recipe_ingredient_exposure: pl.DataFrame,
+    calendar: pl.DataFrame,
 ) -> pl.DataFrame:
     """Compare waste on days where an ingredient-unit appears in planned recipes.
 
-    This join only matches identical ingredient names and identical units. Rows
-    with no matching recipe exposure are treated as "not planned in available
-    recipes", not proof that the ingredient was unused.
+    This join only matches identical locations, ingredient names, and units.
+    Rows with no matching recipe exposure are treated as "not planned in
+    available recipes", not proof that the ingredient was unused.
     """
 
     if daily_waste.is_empty() and recipe_ingredient_exposure.is_empty():
         return pl.DataFrame(
             schema={
                 WASTE_INGREDIENT_COL: pl.Utf8,
+                WASTE_LOCATION_COL: pl.Utf8,
                 WASTE_UNIT_COL: pl.Utf8,
                 "ingredient_planned_in_available_recipes": pl.Boolean,
                 "days": pl.UInt32,
                 "avg_waste_quantity": pl.Float64,
                 "median_waste_quantity": pl.Float64,
+                "q25_waste_quantity": pl.Float64,
+                "q75_waste_quantity": pl.Float64,
                 "avg_planned_recipe_count": pl.Float64,
             }
         )
 
     exposure = recipe_ingredient_exposure
-    observed_dates = pl.concat(
-        [
-            daily_waste.select(pl.col(WASTE_DATE_COL)),
-            exposure.select(pl.col(WASTE_DATE_COL)),
-        ],
-        how="vertical",
+    location_bounds = (
+        daily_waste.group_by(WASTE_LOCATION_COL)
+        .agg(
+            pl.min(WASTE_DATE_COL).alias("min_date"),
+            pl.max(WASTE_DATE_COL).alias("max_date"),
+        )
     )
-    bounds = observed_dates.select(
-        min_date=pl.min(WASTE_DATE_COL),
-        max_date=pl.max(WASTE_DATE_COL),
-    ).row(0, named=True)
-    dates = pl.DataFrame(
-        {
-            WASTE_DATE_COL: pl.date_range(
-                bounds["min_date"],
-                bounds["max_date"],
-                interval="1d",
-                eager=True,
-            )
-        }
+
+    location_service_days = (
+        calendar.filter(pl.col("is_regular_service_day"))
+        .select(pl.col("day").alias(WASTE_DATE_COL))
+        .join(location_bounds, how="cross")
+        .filter(pl.col(WASTE_DATE_COL).is_between(pl.col("min_date"), pl.col("max_date"), closed="both"))
+        .drop("min_date", "max_date")
     )
-    ingredient_units = pl.concat(
+    location_ingredient_units = pl.concat(
         [
-            daily_waste.select(WASTE_INGREDIENT_COL, WASTE_UNIT_COL),
-            exposure.select(WASTE_INGREDIENT_COL, WASTE_UNIT_COL),
+            daily_waste.select(WASTE_LOCATION_COL, WASTE_INGREDIENT_COL, WASTE_UNIT_COL),
+            exposure.select(WASTE_LOCATION_COL, WASTE_INGREDIENT_COL, WASTE_UNIT_COL),
         ],
         how="vertical",
     ).unique()
 
     full_grid = (
-        dates.join(ingredient_units, how="cross")
+        location_service_days.join(location_ingredient_units, on=WASTE_LOCATION_COL, how="inner")
         .join(
             daily_waste,
-            on=[WASTE_DATE_COL, WASTE_INGREDIENT_COL, WASTE_UNIT_COL],
+            on=[WASTE_DATE_COL, WASTE_LOCATION_COL, WASTE_INGREDIENT_COL, WASTE_UNIT_COL],
             how="left",
         )
         .join(
             exposure,
-            on=[WASTE_DATE_COL, WASTE_INGREDIENT_COL, WASTE_UNIT_COL],
+            on=[WASTE_DATE_COL, WASTE_LOCATION_COL, WASTE_INGREDIENT_COL, WASTE_UNIT_COL],
             how="left",
         )
         .with_columns(
@@ -1010,7 +1027,12 @@ def compare_waste_when_ingredient_planned(
 
     return (
         full_grid
-        .group_by(WASTE_INGREDIENT_COL, WASTE_UNIT_COL, "ingredient_planned_in_available_recipes")
+        .group_by(
+            WASTE_LOCATION_COL,
+            WASTE_INGREDIENT_COL,
+            WASTE_UNIT_COL,
+            "ingredient_planned_in_available_recipes",
+        )
         .agg(
             pl.len().alias("days"),
             pl.mean("daily_waste_quantity").alias("avg_waste_quantity"),
@@ -1019,7 +1041,12 @@ def compare_waste_when_ingredient_planned(
             pl.col("daily_waste_quantity").quantile(0.75).alias("q75_waste_quantity"),
             pl.mean("planned_recipe_count").alias("avg_planned_recipe_count"),
         )
-        .sort(WASTE_INGREDIENT_COL, WASTE_UNIT_COL, "ingredient_planned_in_available_recipes")
+        .sort(
+            WASTE_LOCATION_COL,
+            WASTE_INGREDIENT_COL,
+            WASTE_UNIT_COL,
+            "ingredient_planned_in_available_recipes",
+        )
     )
 
 
@@ -1046,8 +1073,8 @@ def compute_extended_demand_exploration(
     1. Total demand baseline: weekday, semester, lecture-period effects.
     2. Schedule pressure: does registered campus load explain sales residuals?
     3. Menu mix: how much does offer breadth vary by day?
-    4. Waste concentration: which ingredient-unit series dominate waste?
-    5. Recipe bridge: which ingredient-unit waste increases when planned?
+    4. Waste concentration: which location/ingredient/unit series dominate waste?
+    5. Recipe bridge: which location/ingredient/unit waste increases when planned?
     """
 
     total_sales_analysis = compute_total_sales_analysis(sales, **calendar_kwargs)
@@ -1066,7 +1093,6 @@ def compute_extended_demand_exploration(
             daily_schedule_load,
         )
 
-    menu_popularity = None
     daily_menu_mix = None
     if meal_plan is not None:
         daily_menu_mix = build_daily_menu_mix(meal_plan)
@@ -1090,6 +1116,7 @@ def compute_extended_demand_exploration(
             ingredient_waste_when_planned = compare_waste_when_ingredient_planned(
                 daily_waste,
                 recipe_ingredient_exposure,
+                total_sales_analysis.calendar,
             )
 
     return ExtendedDemandExploration(
@@ -1097,7 +1124,6 @@ def compute_extended_demand_exploration(
         daily_schedule_load=daily_schedule_load,
         schedule_sales_effect=schedule_sales_effect,
         category_schedule_effect=category_schedule_effect,
-        menu_popularity=menu_popularity,
         daily_menu_mix=daily_menu_mix,
         daily_waste=daily_waste,
         ingredient_unit_waste=ingredient_unit_waste,

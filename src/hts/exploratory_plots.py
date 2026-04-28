@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import matplotlib.pyplot as plt
+from matplotlib.container import BarContainer
 import polars as pl
 
 from .exploratory_analysis import (
@@ -13,6 +14,7 @@ from .exploratory_analysis import (
     TotalSalesAnalysis,
     WEEKDAY_ORDER,
     WASTE_INGREDIENT_COL,
+    WASTE_LOCATION_COL,
     WASTE_UNIT_COL,
 )
 
@@ -29,8 +31,12 @@ def _first_present_column(df: pl.DataFrame, candidates: list[str]) -> str | None
 
 
 def _bar_label_if_possible(ax: plt.Axes, fmt: str = "%.0f") -> None:
-    if ax.containers:
-        ax.bar_label(ax.containers[0], fmt=fmt, padding=3)
+    bar_container = next(
+        (container for container in ax.containers if isinstance(container, BarContainer)),
+        None,
+    )
+    if bar_container is not None:
+        ax.bar_label(bar_container, fmt=fmt, padding=3)
 
 
 def _iqr_error_kwargs(rows: list[dict], value_col: str, q25_col: str, q75_col: str) -> dict:
@@ -69,6 +75,17 @@ def _top_n(df: pl.DataFrame, sort_col: str, n: int, descending: bool = True) -> 
     if df.is_empty() or sort_col not in df.columns:
         return df
     return df.sort(sort_col, descending=descending).head(n)
+
+
+def _location_unit_rows(df: pl.DataFrame) -> list[dict]:
+    if df.is_empty():
+        return []
+    return (
+        df.select(WASTE_LOCATION_COL, WASTE_UNIT_COL)
+        .unique()
+        .sort(WASTE_LOCATION_COL, WASTE_UNIT_COL)
+        .to_dicts()
+    )
 
 
 def plot_total_demand_over_time(daily_total_sales: pl.DataFrame) -> tuple[plt.Figure, plt.Axes]:
@@ -214,14 +231,18 @@ def plot_category_share(category_effect: pl.DataFrame) -> tuple[plt.Figure, plt.
     ax.set_ylabel("")
     _bar_label_if_possible(ax, "%.1f%%")
     if rows and "service_days_offered" in rows[0]:
+        max_share = max(row["sales_share_pct"] for row in rows) if rows else 0
+        label_offset = max(max_share * 0.08, 1.0)
         for container, row in zip(ax.containers[0], rows):
             ax.text(
-                container.get_width(),
+                container.get_width() + label_offset,
                 container.get_y() + container.get_height() / 2,
-                f"  n={row['service_days_offered']}",
+                f"n={row['service_days_offered']}",
                 va="center",
+                ha="left",
                 fontsize=8,
             )
+        ax.set_xlim(right=max_share + label_offset * 4)
     fig.tight_layout()
     return fig, ax
 
@@ -357,34 +378,6 @@ def plot_category_schedule_effect(
     return fig, ax
 
 
-def plot_menu_popularity(
-    menu_popularity: pl.DataFrame,
-    *,
-    top_n_dishes: int = 15,
-) -> tuple[plt.Figure, plt.Axes]:
-    """Plot the highest-demand dishes when offered."""
-
-    _set_style()
-    dish_col = _first_present_column(menu_popularity, ["dish_name", "dish_name_right"])
-    if dish_col is None:
-        raise ValueError("menu_popularity must contain a dish_name column")
-
-    data = _top_n(menu_popularity, "avg_sales_when_offered", top_n_dishes)
-    rows = data.sort("avg_sales_when_offered").to_dicts()
-    fig, ax = plt.subplots(figsize=(10, 7))
-    ax.barh(
-        [row[dish_col] for row in rows],
-        [row["avg_sales_when_offered"] for row in rows],
-        color="#e45756",
-    )
-    ax.set_title("Top Dishes by Average Demand When Offered")
-    ax.set_xlabel("Average dishes sold")
-    ax.set_ylabel("")
-    _bar_label_if_possible(ax)
-    fig.tight_layout()
-    return fig, ax
-
-
 def plot_daily_menu_mix(daily_menu_mix: pl.DataFrame) -> tuple[plt.Figure, plt.Axes]:
     """Plot daily offer-count features from the meal plan."""
 
@@ -419,21 +412,30 @@ def plot_ingredient_unit_waste(
     *,
     top_n_series: int = 15,
 ) -> tuple[plt.Figure, list[plt.Axes]]:
-    """Plot highest-waste ingredient series in separate panels by unit."""
+    """Plot highest-waste ingredient series in separate panels by location and unit."""
 
     _set_style()
-    units = ingredient_unit_waste.get_column(WASTE_UNIT_COL).unique().sort().to_list()
-    if not units:
+    panel_rows = _location_unit_rows(ingredient_unit_waste)
+    if not panel_rows:
         fig, ax = plt.subplots(figsize=(8, 3))
         ax.set_axis_off()
         ax.set_title("No Waste Records Available")
         return fig, [ax]
-    fig, axes_grid = plt.subplots(len(units), 1, figsize=(10, max(3.5, 3.2 * len(units))))
+    fig, axes_grid = plt.subplots(
+        len(panel_rows),
+        1,
+        figsize=(11, max(3.5, 3.3 * len(panel_rows))),
+    )
     axes = _axes_list(axes_grid)
 
-    for ax, unit in zip(axes, units):
+    for ax, panel in zip(axes, panel_rows):
+        location = panel[WASTE_LOCATION_COL]
+        unit = panel[WASTE_UNIT_COL]
         data = _top_n(
-            ingredient_unit_waste.filter(pl.col(WASTE_UNIT_COL) == unit),
+            ingredient_unit_waste.filter(
+                (pl.col(WASTE_LOCATION_COL) == location)
+                & (pl.col(WASTE_UNIT_COL) == unit)
+            ),
             "total_waste_quantity",
             top_n_series,
         )
@@ -443,7 +445,7 @@ def plot_ingredient_unit_waste(
             [row["total_waste_quantity"] for row in rows],
             color="#b279a2",
         )
-        ax.set_title(f"Largest Waste Series ({unit})")
+        ax.set_title(f"Largest Waste Series - {location} ({unit})")
         ax.set_xlabel(f"Total waste quantity ({unit})")
         ax.set_ylabel("")
         _bar_label_if_possible(ax, "%.1f")
@@ -457,34 +459,63 @@ def plot_waste_calendar_effect(
     *,
     top_n_series: int = 10,
 ) -> tuple[plt.Figure, list[plt.Axes]]:
-    """Plot average waste by academic period without mixing measurement units."""
+    """Plot average waste by academic period, location, and unit."""
 
     _set_style()
-    units = waste_calendar_effect.get_column(WASTE_UNIT_COL).unique().sort().to_list()
-    if not units:
+    panel_rows = _location_unit_rows(waste_calendar_effect)
+    if not panel_rows:
         fig, ax = plt.subplots(figsize=(8, 3))
         ax.set_axis_off()
         ax.set_title("No Waste Calendar Effects Available")
         return fig, [ax]
-    fig, axes_grid = plt.subplots(len(units), 1, figsize=(10, max(3.5, 3.4 * len(units))))
+    fig, axes_grid = plt.subplots(
+        len(panel_rows),
+        1,
+        figsize=(11, max(3.5, 3.5 * len(panel_rows))),
+    )
     axes = _axes_list(axes_grid)
 
-    for ax, unit in zip(axes, units):
-        unit_data = waste_calendar_effect.filter(pl.col(WASTE_UNIT_COL) == unit)
+    for ax, panel in zip(axes, panel_rows):
+        location = panel[WASTE_LOCATION_COL]
+        unit = panel[WASTE_UNIT_COL]
+        panel_data = waste_calendar_effect.filter(
+            (pl.col(WASTE_LOCATION_COL) == location)
+            & (pl.col(WASTE_UNIT_COL) == unit)
+        )
         selected = (
-            unit_data.group_by(WASTE_INGREDIENT_COL)
-            .agg(pl.mean("avg_waste_quantity").alias("overall_avg_waste"))
-            .sort("overall_avg_waste", descending=True)
+            panel_data.group_by(WASTE_INGREDIENT_COL)
+            .agg(
+                (pl.col("avg_waste_quantity") * pl.col("service_days"))
+                .sum()
+                .alias("estimated_total_waste")
+            )
+            .sort("estimated_total_waste", descending=True)
             .head(top_n_series)
             .get_column(WASTE_INGREDIENT_COL)
             .to_list()
         )
-        rows = (
-            unit_data.filter(pl.col(WASTE_INGREDIENT_COL).is_in(selected))
+        selected_data = panel_data.filter(pl.col(WASTE_INGREDIENT_COL).is_in(selected))
+        period_totals = (
+            selected_data
             .group_by("academic_bucket")
             .agg(
-                pl.mean("avg_waste_quantity").alias("avg_waste_quantity"),
-                pl.sum("service_days").alias("service_days"),
+                (pl.col("avg_waste_quantity") * pl.col("service_days"))
+                .sum()
+                .alias("estimated_total_waste"),
+            )
+        )
+        period_days = (
+            selected_data.group_by("academic_bucket", "weekday")
+            .agg(pl.col("service_days").max().alias("weekday_service_days"))
+            .group_by("academic_bucket")
+            .agg(pl.sum("weekday_service_days").alias("service_days"))
+        )
+        rows = (
+            period_totals.join(period_days, on="academic_bucket", how="left")
+            .with_columns(
+                (pl.col("estimated_total_waste") / pl.col("service_days")).alias(
+                    "avg_waste_quantity"
+                )
             )
             .join(
                 pl.DataFrame(
@@ -504,9 +535,9 @@ def plot_waste_calendar_effect(
             [row["avg_waste_quantity"] for row in rows],
             color="#59a14f",
         )
-        ax.set_title(f"Average Waste by Academic Period ({unit})")
+        ax.set_title(f"Average Waste by Academic Period - {location} ({unit})")
         ax.set_xlabel("")
-        ax.set_ylabel(f"Average waste ({unit})")
+        ax.set_ylabel(f"Average daily waste ({unit})")
         ax.tick_params(axis="x", rotation=25)
         _bar_label_if_possible(ax, "%.1f")
 
@@ -519,7 +550,7 @@ def plot_ingredient_waste_when_planned(
     *,
     top_n_series: int = 12,
 ) -> tuple[plt.Figure, list[plt.Axes]]:
-    """Compare waste when an ingredient appears in planned recipes, by unit."""
+    """Compare waste when an ingredient appears in planned recipes, by location and unit."""
 
     _set_style()
     data = ingredient_waste_when_planned.with_columns(
@@ -527,26 +558,35 @@ def plot_ingredient_waste_when_planned(
             [pl.col(WASTE_INGREDIENT_COL), pl.lit(" / "), pl.col(WASTE_UNIT_COL)]
         )
     )
-    units = data.get_column(WASTE_UNIT_COL).unique().sort().to_list()
-    if not units:
+    panel_rows = _location_unit_rows(data)
+    if not panel_rows:
         fig, ax = plt.subplots(figsize=(8, 3))
         ax.set_axis_off()
         ax.set_title("No Ingredient Planning Waste Comparison Available")
         return fig, [ax]
-    fig, axes_grid = plt.subplots(len(units), 1, figsize=(12, max(4, 3.8 * len(units))))
+    fig, axes_grid = plt.subplots(
+        len(panel_rows),
+        1,
+        figsize=(12, max(4, 3.9 * len(panel_rows))),
+    )
     axes = _axes_list(axes_grid)
 
-    for ax, unit in zip(axes, units):
-        unit_data = data.filter(pl.col(WASTE_UNIT_COL) == unit)
+    for ax, panel in zip(axes, panel_rows):
+        location = panel[WASTE_LOCATION_COL]
+        unit = panel[WASTE_UNIT_COL]
+        panel_data = data.filter(
+            (pl.col(WASTE_LOCATION_COL) == location)
+            & (pl.col(WASTE_UNIT_COL) == unit)
+        )
         selected = (
-            unit_data.group_by("series_label")
+            panel_data.group_by("series_label")
             .agg(pl.max("avg_waste_quantity").alias("max_avg_waste_quantity"))
             .sort("max_avg_waste_quantity", descending=True)
             .head(top_n_series)
             .get_column("series_label")
             .to_list()
         )
-        filtered = unit_data.filter(pl.col("series_label").is_in(selected))
+        filtered = panel_data.filter(pl.col("series_label").is_in(selected))
         series_labels = sorted(selected)
         lookup = {
             (row["series_label"], row["ingredient_planned_in_available_recipes"]): row[
@@ -578,7 +618,7 @@ def plot_ingredient_waste_when_planned(
             color="#4c78a8",
             label="Planned in available recipes",
         )
-        ax.set_title(f"Waste When Ingredient Appears in Planned Recipes ({unit})")
+        ax.set_title(f"Waste When Ingredient Appears in Planned Recipes - {location} ({unit})")
         ax.set_xlabel("")
         ax.set_ylabel(f"Average waste ({unit})")
         ax.set_xticks(x_positions)
@@ -589,33 +629,80 @@ def plot_ingredient_waste_when_planned(
     return fig, axes
 
 
+def named_total_sales_analysis_plots(
+    analysis: TotalSalesAnalysis,
+) -> list[tuple[str, plt.Figure]]:
+    """Create named total-sales plots for deterministic disk output."""
+
+    return [
+        ("total_demand_over_time.png", plot_total_demand_over_time(analysis.daily_total_sales)[0]),
+        ("calendar_effects.png", plot_calendar_effects(analysis)[0]),
+        (
+            "weekday_lecture_vs_free.png",
+            plot_weekday_lecture_vs_free(analysis.lecture_weekday_effect)[0],
+        ),
+        ("category_share.png", plot_category_share(analysis.category_effect)[0]),
+    ]
+
+
+def named_extended_demand_exploration_plots(
+    exploration: ExtendedDemandExploration,
+) -> list[tuple[str, plt.Figure]]:
+    """Create named stakeholder-facing plots for every available EDA output."""
+
+    named_figures = named_total_sales_analysis_plots(exploration.total_sales_analysis)
+
+    if exploration.schedule_sales_effect is not None:
+        named_figures.append(
+            ("schedule_pressure.png", plot_schedule_pressure(exploration.schedule_sales_effect)[0])
+        )
+
+    if exploration.category_schedule_effect is not None:
+        named_figures.append(
+            (
+                "category_schedule_effect.png",
+                plot_category_schedule_effect(exploration.category_schedule_effect)[0],
+            )
+        )
+
+    if exploration.daily_menu_mix is not None:
+        named_figures.append(("daily_menu_mix.png", plot_daily_menu_mix(exploration.daily_menu_mix)[0]))
+
+    if exploration.ingredient_unit_waste is not None:
+        named_figures.append(
+            (
+                "ingredient_unit_waste.png",
+                plot_ingredient_unit_waste(exploration.ingredient_unit_waste)[0],
+            )
+        )
+
+    if exploration.waste_calendar_effect is not None:
+        named_figures.append(
+            (
+                "waste_calendar_effect.png",
+                plot_waste_calendar_effect(exploration.waste_calendar_effect)[0],
+            )
+        )
+
+    if exploration.ingredient_waste_when_planned is not None:
+        named_figures.append(
+            (
+                "ingredient_waste_when_planned.png",
+                plot_ingredient_waste_when_planned(
+                    exploration.ingredient_waste_when_planned
+                )[0],
+            )
+        )
+
+    return named_figures
+
+
 def plot_extended_demand_exploration(
     exploration: ExtendedDemandExploration,
 ) -> list[plt.Figure]:
     """Create available stakeholder-facing plots for the extended EDA."""
 
-    figures = plot_total_sales_analysis(exploration.total_sales_analysis)
-
-    if exploration.schedule_sales_effect is not None:
-        figures.append(plot_schedule_pressure(exploration.schedule_sales_effect)[0])
-
-    if exploration.category_schedule_effect is not None:
-        figures.append(plot_category_schedule_effect(exploration.category_schedule_effect)[0])
-
-    if exploration.daily_menu_mix is not None:
-        figures.append(plot_daily_menu_mix(exploration.daily_menu_mix)[0])
-
-    if exploration.ingredient_unit_waste is not None:
-        figures.append(plot_ingredient_unit_waste(exploration.ingredient_unit_waste)[0])
-
-    if exploration.waste_calendar_effect is not None:
-        figures.append(plot_waste_calendar_effect(exploration.waste_calendar_effect)[0])
-
-    if exploration.ingredient_waste_when_planned is not None:
-        figures.append(
-            plot_ingredient_waste_when_planned(
-                exploration.ingredient_waste_when_planned
-            )[0]
-        )
-
-    return figures
+    return [
+        figure
+        for _, figure in named_extended_demand_exploration_plots(exploration)
+    ]
