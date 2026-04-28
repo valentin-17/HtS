@@ -3,7 +3,7 @@
 Expected input schema for raw/prepared sales data:
 
     date: date-like value convertible to ``pl.Date``
-    meal category: string category, for example "Menu 1" or "Pizza - Oliva"
+    meal_category: string category, for example "Menu 1" or "Pizza - Oliva"
     name: string meal/dish name
     sales: integer or numeric count of dishes passed over the counter and sold
 
@@ -20,14 +20,34 @@ from datetime import date, timedelta
 from typing import Any
 
 import holidays
-import matplotlib.pyplot as plt
 import polars as pl
 
 
 SALES_DATE_COL = "date"
-SALES_CATEGORY_COL = "meal category"
+SALES_CATEGORY_COL = "meal_category"
 SALES_NAME_COL = "name"
 SALES_COUNT_COL = "sales"
+
+SCHEDULE_DATE_COL = "date"
+SCHEDULE_EVENT_ID_COL = "event_id"
+SCHEDULE_TYPE_COL = "event_type"
+SCHEDULE_REGISTERED_COL = "registered_students"
+
+MEAL_PLAN_DATE_COL = "date"
+MEAL_PLAN_CATEGORY_COL = "meal_category"
+MEAL_PLAN_DISH_COL = "dish_name"
+MEAL_PLAN_RECIPE_COL = "recipe_id"
+
+WASTE_DATE_COL = "date"
+WASTE_INGREDIENT_COL = "ingredient_name"
+WASTE_UNIT_COL = "unit"
+WASTE_QUANTITY_COL = "waste_quantity"
+
+RECIPE_ID_COL = "recipe_id"
+RECIPE_DISH_COL = "dish_name"
+RECIPE_INGREDIENT_COL = "ingredient_name"
+RECIPE_UNIT_COL = "unit"
+RECIPE_AMOUNT_COL = "recipe_amount"
 
 WEEKDAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 SEASON_ORDER = ["winter", "spring", "summer", "autumn"]
@@ -37,7 +57,6 @@ ACADEMIC_BUCKET_ORDER = [
     "semester_lecture_free",
     "semester_break",
 ]
-
 
 DEFAULT_SEMESTER_TERMS = [
     {
@@ -100,6 +119,23 @@ class TotalSalesAnalysis:
     academic_effect: pl.DataFrame
     lecture_weekday_effect: pl.DataFrame
     category_effect: pl.DataFrame
+
+
+@dataclass(frozen=True)
+class ExtendedDemandExploration:
+    """Container for exploratory outputs across all prepared NDA data sources."""
+
+    total_sales_analysis: TotalSalesAnalysis
+    daily_schedule_load: pl.DataFrame | None = None
+    schedule_sales_effect: pl.DataFrame | None = None
+    category_schedule_effect: pl.DataFrame | None = None
+    menu_popularity: pl.DataFrame | None = None
+    daily_menu_mix: pl.DataFrame | None = None
+    daily_waste: pl.DataFrame | None = None
+    ingredient_unit_waste: pl.DataFrame | None = None
+    waste_calendar_effect: pl.DataFrame | None = None
+    recipe_ingredient_exposure: pl.DataFrame | None = None
+    ingredient_waste_when_planned: pl.DataFrame | None = None
 
 
 def _period_label(
@@ -288,6 +324,14 @@ def validate_sales_schema(sales: pl.DataFrame) -> None:
         raise ValueError(f"Missing required sales columns: {sorted(missing_columns)}")
 
 
+def validate_columns(df: pl.DataFrame, required_columns: set[str], table_name: str) -> None:
+    """Raise a clear error if a prepared NDA dataframe is missing columns."""
+
+    missing_columns = required_columns - set(df.columns)
+    if missing_columns:
+        raise ValueError(f"Missing required {table_name} columns: {sorted(missing_columns)}")
+
+
 def normalize_sales_frame(sales: pl.DataFrame) -> pl.DataFrame:
     """Cast prepared sales data to stable types used by the analysis functions."""
 
@@ -297,6 +341,149 @@ def normalize_sales_frame(sales: pl.DataFrame) -> pl.DataFrame:
         pl.col(SALES_CATEGORY_COL).cast(pl.Utf8),
         pl.col(SALES_NAME_COL).cast(pl.Utf8),
         pl.col(SALES_COUNT_COL).cast(pl.Int64),
+    )
+
+
+def normalize_schedule_frame(schedule: pl.DataFrame) -> pl.DataFrame:
+    """Normalize prepared university schedule rows.
+
+    Expected input schema:
+
+        date: date-like value of the lecture/tutorial day
+        event_id: stable lecture/tutorial identifier; unique per scheduled event is ideal
+        event_type: string such as "lecture", "tutorial", "seminar", "exam", "event"
+        registered_students: numeric count of registered students for that event
+
+    Optional columns are ignored by this module but useful for later modeling:
+    start_time, end_time, faculty, campus, room, course_id, degree_program.
+
+    The analysis treats registered_students as a demand-pressure proxy, not as
+    literal cafeteria attendance. If one course has multiple parallel tutorials,
+    keep each tutorial as a separate row only if students are registered to that
+    tutorial separately; otherwise de-duplicate before passing the table in.
+    """
+
+    validate_columns(
+        schedule,
+        {
+            SCHEDULE_DATE_COL,
+            SCHEDULE_EVENT_ID_COL,
+            SCHEDULE_TYPE_COL,
+            SCHEDULE_REGISTERED_COL,
+        },
+        "schedule",
+    )
+    return schedule.with_columns(
+        pl.col(SCHEDULE_DATE_COL).cast(pl.Date),
+        pl.col(SCHEDULE_EVENT_ID_COL).cast(pl.Utf8),
+        pl.col(SCHEDULE_TYPE_COL).cast(pl.Utf8),
+        pl.col(SCHEDULE_REGISTERED_COL).cast(pl.Float64),
+    )
+
+
+def normalize_meal_plan_frame(meal_plan: pl.DataFrame) -> pl.DataFrame:
+    """Normalize prepared meal-plan rows.
+
+    Expected input schema:
+
+        date: date-like service day
+        meal_category: category matching sales where possible, e.g. "Menu 1"
+        dish_name: displayed dish name
+        recipe_id: recipe identifier; nullable if no recipe match is available
+
+    Recommended optional columns for later modeling:
+    is_vegan, is_vegetarian, contains_meat, contains_fish, price, cuisine,
+    production_complexity, planned_portions, sold_out_before_close.
+
+    Keep one row per offered dish/category/day. If a category has multiple
+    alternatives on the same day, keep multiple rows and distinguish dish_name
+    and recipe_id.
+    """
+
+    validate_columns(
+        meal_plan,
+        {
+            MEAL_PLAN_DATE_COL,
+            MEAL_PLAN_CATEGORY_COL,
+            MEAL_PLAN_DISH_COL,
+            MEAL_PLAN_RECIPE_COL,
+        },
+        "meal_plan",
+    )
+    return meal_plan.with_columns(
+        pl.col(MEAL_PLAN_DATE_COL).cast(pl.Date),
+        pl.col(MEAL_PLAN_CATEGORY_COL).cast(pl.Utf8),
+        pl.col(MEAL_PLAN_DISH_COL).cast(pl.Utf8),
+        pl.col(MEAL_PLAN_RECIPE_COL).cast(pl.Utf8),
+    )
+
+
+def normalize_waste_frame(waste: pl.DataFrame) -> pl.DataFrame:
+    """Normalize prepared ingredient waste rows.
+
+    Expected input schema:
+
+        date: date-like waste recording day
+        ingredient_name: canonical ingredient label after your own cleaning
+        unit: one of "liter", "kilogram", "portion", "piece"
+        waste_quantity: numeric waste amount in the stated unit
+
+    Important: this module never converts units. All waste summaries group by
+    (ingredient_name, unit), so "tomato / kilogram" and "tomato / piece" remain
+    separate measurement series.
+    """
+
+    validate_columns(
+        waste,
+        {
+            WASTE_DATE_COL,
+            WASTE_INGREDIENT_COL,
+            WASTE_UNIT_COL,
+            WASTE_QUANTITY_COL,
+        },
+        "waste",
+    )
+    return waste.with_columns(
+        pl.col(WASTE_DATE_COL).cast(pl.Date),
+        pl.col(WASTE_INGREDIENT_COL).cast(pl.Utf8),
+        pl.col(WASTE_UNIT_COL).cast(pl.Utf8),
+        pl.col(WASTE_QUANTITY_COL).cast(pl.Float64),
+    )
+
+
+def normalize_recipe_frame(recipes: pl.DataFrame) -> pl.DataFrame:
+    """Normalize prepared recipe ingredient rows.
+
+    Expected input schema:
+
+        recipe_id: stable recipe identifier matching meal_plan.recipe_id
+        dish_name: recipe/dish name
+        ingredient_name: canonical ingredient label matching waste where possible
+        unit: unit used in the recipe amount
+        recipe_amount: numeric amount used in the recipe PDF
+
+    Unknown portion counts are acceptable. recipe_amount is used only as a
+    relative exposure signal within the same recipe unit, never as a per-portion
+    amount and never converted across units.
+    """
+
+    validate_columns(
+        recipes,
+        {
+            RECIPE_ID_COL,
+            RECIPE_DISH_COL,
+            RECIPE_INGREDIENT_COL,
+            RECIPE_UNIT_COL,
+            RECIPE_AMOUNT_COL,
+        },
+        "recipes",
+    )
+    return recipes.with_columns(
+        pl.col(RECIPE_ID_COL).cast(pl.Utf8),
+        pl.col(RECIPE_DISH_COL).cast(pl.Utf8),
+        pl.col(RECIPE_INGREDIENT_COL).cast(pl.Utf8),
+        pl.col(RECIPE_UNIT_COL).cast(pl.Utf8),
+        pl.col(RECIPE_AMOUNT_COL).cast(pl.Float64),
     )
 
 
@@ -336,6 +523,39 @@ def build_daily_total_sales(sales_with_calendar: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def summarize_total_sales() -> list[pl.Expr]:
+    """Return common demand summary statistics for stakeholder-facing charts."""
+
+    return [
+        pl.len().alias("service_days"),
+        pl.mean("total_sales").alias("avg_sales"),
+        pl.median("total_sales").alias("median_sales"),
+        pl.col("total_sales").quantile(0.25).alias("q25_sales"),
+        pl.col("total_sales").quantile(0.75).alias("q75_sales"),
+        pl.std("total_sales").alias("std_sales"),
+    ]
+
+
+def build_daily_category_sales(sales_with_calendar: pl.DataFrame) -> pl.DataFrame:
+    """Aggregate sales to one row per day and meal category before summaries."""
+
+    return (
+        sales_with_calendar.group_by(
+            SALES_DATE_COL,
+            SALES_CATEGORY_COL,
+            "weekday",
+            "weekday_number",
+            "season",
+            "semester",
+            "semester_season",
+            "is_lecture_day",
+            "academic_bucket",
+        )
+        .agg(pl.sum(SALES_COUNT_COL).alias("category_sales"))
+        .sort(SALES_DATE_COL, SALES_CATEGORY_COL)
+    )
+
+
 def ordered_bar_data(df: pl.DataFrame, label_col: str, order: list[str]) -> pl.DataFrame:
     """Return a dataframe sorted by a fixed stakeholder-facing label order."""
 
@@ -364,24 +584,25 @@ def compute_total_sales_analysis(
     )
     sales_with_calendar = join_sales_to_calendar(sales, calendar)
     daily_total_sales = build_daily_total_sales(sales_with_calendar)
+    daily_category_sales = build_daily_category_sales(sales_with_calendar)
 
     weekday_effect = ordered_bar_data(
-        daily_total_sales.group_by("weekday").agg(pl.mean("total_sales").alias("avg_sales")),
+        daily_total_sales.group_by("weekday").agg(summarize_total_sales()),
         "weekday",
         WEEKDAY_ORDER,
     )
     season_effect = ordered_bar_data(
-        daily_total_sales.group_by("season").agg(pl.mean("total_sales").alias("avg_sales")),
+        daily_total_sales.group_by("season").agg(summarize_total_sales()),
         "season",
         SEASON_ORDER,
     )
     semester_effect = ordered_bar_data(
-        daily_total_sales.group_by("semester").agg(pl.mean("total_sales").alias("avg_sales")),
+        daily_total_sales.group_by("semester").agg(summarize_total_sales()),
         "semester",
         [term["semester"] for term in semester_terms],
     )
     academic_effect = ordered_bar_data(
-        daily_total_sales.group_by("academic_bucket").agg(pl.mean("total_sales").alias("avg_sales")),
+        daily_total_sales.group_by("academic_bucket").agg(summarize_total_sales()),
         "academic_bucket",
         ACADEMIC_BUCKET_ORDER,
     )
@@ -392,11 +613,16 @@ def compute_total_sales_analysis(
             .otherwise(pl.lit("Lecture-free period"))
         )
         .group_by("weekday", "period_type")
-        .agg(pl.mean("total_sales").alias("avg_sales"))
+        .agg(summarize_total_sales())
     )
     category_effect = (
-        sales_with_calendar.group_by(SALES_CATEGORY_COL)
-        .agg(pl.sum(SALES_COUNT_COL).alias("total_sales"))
+        daily_category_sales.group_by(SALES_CATEGORY_COL)
+        .agg(
+            pl.len().alias("service_days_offered"),
+            pl.sum("category_sales").alias("total_sales"),
+            pl.mean("category_sales").alias("avg_daily_sales_when_offered"),
+            pl.median("category_sales").alias("median_daily_sales_when_offered"),
+        )
         .with_columns((pl.col("total_sales") / pl.sum("total_sales") * 100).alias("sales_share_pct"))
         .sort("total_sales")
     )
@@ -416,142 +642,6 @@ def compute_total_sales_analysis(
     )
 
 
-def plot_total_demand_over_time(daily_total_sales: pl.DataFrame) -> tuple[plt.Figure, plt.Axes]:
-    """Plot daily total demand and a 10 service-day rolling average."""
-
-    rows = daily_total_sales.to_dicts()
-    fig, ax = plt.subplots(figsize=(12, 4.5))
-    ax.plot(
-        [row[SALES_DATE_COL] for row in rows],
-        [row["total_sales"] for row in rows],
-        color="#9aa0a6",
-        linewidth=1,
-        alpha=0.45,
-        label="Daily total",
-    )
-    ax.plot(
-        [row[SALES_DATE_COL] for row in rows],
-        [row["rolling_mean_10_service_days"] for row in rows],
-        color="#1f77b4",
-        linewidth=2.5,
-        label="10 service-day average",
-    )
-    ax.set_title("Total Daily Demand Over Time")
-    ax.set_xlabel("")
-    ax.set_ylabel("Dishes sold")
-    ax.legend(frameon=False)
-    fig.autofmt_xdate()
-    fig.tight_layout()
-    return fig, ax
-
-
-def plot_calendar_effects(analysis: TotalSalesAnalysis) -> tuple[plt.Figure, list[plt.Axes]]:
-    """Plot weekday, season, semester, and academic-period effects."""
-
-    plt.style.use("seaborn-v0_8-whitegrid")
-    fig, axes_grid = plt.subplots(2, 2, figsize=(12, 8))
-    axes = [axes_grid[0, 0], axes_grid[0, 1], axes_grid[1, 0], axes_grid[1, 1]]
-    effect_specs = [
-        (axes[0], analysis.weekday_effect, "weekday", "Average Demand by Weekday"),
-        (axes[1], analysis.season_effect, "season", "Average Demand by Season"),
-        (axes[2], analysis.semester_effect, "semester", "Average Demand by Semester"),
-        (axes[3], analysis.academic_effect, "academic_bucket", "Average Demand by Academic Period"),
-    ]
-
-    for ax, data, label_col, title in effect_specs:
-        rows = data.to_dicts()
-        ax.bar(
-            [row[label_col] for row in rows],
-            [row["avg_sales"] for row in rows],
-            color="#4c78a8",
-        )
-        ax.set_title(title)
-        ax.set_xlabel("")
-        ax.set_ylabel("Average dishes sold")
-        ax.tick_params(axis="x", rotation=30)
-        ax.bar_label(ax.containers[0], fmt="%.0f", padding=3)
-
-    fig.tight_layout()
-    return fig, axes
-
-
-def plot_weekday_lecture_vs_free(
-    lecture_weekday_effect: pl.DataFrame,
-) -> tuple[plt.Figure, plt.Axes]:
-    """Plot five weekday pairs comparing lecture and lecture-free periods."""
-
-    lookup = {
-        (row["weekday"], row["period_type"]): row["avg_sales"]
-        for row in lecture_weekday_effect.to_dicts()
-    }
-    lecture_values = [
-        lookup.get((weekday, "Lecture period"), 0)
-        for weekday in WEEKDAY_ORDER
-    ]
-    lecture_free_values = [
-        lookup.get((weekday, "Lecture-free period"), 0)
-        for weekday in WEEKDAY_ORDER
-    ]
-    x_positions = list(range(len(WEEKDAY_ORDER)))
-    bar_width = 0.38
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    lecture_bars = ax.bar(
-        [position - bar_width / 2 for position in x_positions],
-        lecture_values,
-        width=bar_width,
-        label="Lecture period",
-        color="#4c78a8",
-    )
-    lecture_free_bars = ax.bar(
-        [position + bar_width / 2 for position in x_positions],
-        lecture_free_values,
-        width=bar_width,
-        label="Lecture-free period",
-        color="#f58518",
-    )
-    ax.set_title("Average Demand by Weekday: Lecture vs Lecture-Free Period")
-    ax.set_xlabel("")
-    ax.set_ylabel("Average dishes sold")
-    ax.set_xticks(x_positions)
-    ax.set_xticklabels(WEEKDAY_ORDER, rotation=0)
-    ax.legend(frameon=False)
-    ax.bar_label(lecture_bars, fmt="%.0f", padding=3)
-    ax.bar_label(lecture_free_bars, fmt="%.0f", padding=3)
-    fig.tight_layout()
-    return fig, ax
-
-
-def plot_category_share(category_effect: pl.DataFrame) -> tuple[plt.Figure, plt.Axes]:
-    """Plot category share of annual demand as a horizontal bar chart."""
-
-    rows = category_effect.to_dicts()
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.barh(
-        [row[SALES_CATEGORY_COL] for row in rows],
-        [row["sales_share_pct"] for row in rows],
-        color="#59a14f",
-    )
-    ax.set_title("Share of Annual Demand by Category")
-    ax.set_xlabel("Share of dishes sold (%)")
-    ax.set_ylabel("")
-    ax.bar_label(ax.containers[0], fmt="%.1f%%", padding=3)
-    fig.tight_layout()
-    return fig, ax
-
-
-def plot_total_sales_analysis(analysis: TotalSalesAnalysis) -> list[plt.Figure]:
-    """Create all stakeholder-facing total-sales plots."""
-
-    figures = [
-        plot_total_demand_over_time(analysis.daily_total_sales)[0],
-        plot_calendar_effects(analysis)[0],
-        plot_weekday_lecture_vs_free(analysis.lecture_weekday_effect)[0],
-        plot_category_share(analysis.category_effect)[0],
-    ]
-    return figures
-
-
 def run_total_sales_analysis(
     sales: pl.DataFrame,
     *,
@@ -563,6 +653,10 @@ def run_total_sales_analysis(
     analysis = compute_total_sales_analysis(sales, **calendar_kwargs)
 
     if show_plots:
+        import matplotlib.pyplot as plt
+
+        from .exploratory_plots import plot_total_sales_analysis
+
         figures = plot_total_sales_analysis(analysis)
 
         filenames = [
@@ -577,3 +671,437 @@ def run_total_sales_analysis(
             plt.close(fig)
 
     return analysis
+
+
+def build_daily_schedule_load(schedule: pl.DataFrame) -> pl.DataFrame:
+    """Aggregate university schedule rows to a daily campus demand-pressure proxy."""
+
+    normalized_schedule = normalize_schedule_frame(schedule)
+    type_pivot = (
+        normalized_schedule.group_by(SCHEDULE_DATE_COL, SCHEDULE_TYPE_COL)
+        .agg(
+            pl.sum(SCHEDULE_REGISTERED_COL).alias("registered_students_by_type"),
+            pl.n_unique(SCHEDULE_EVENT_ID_COL).alias("event_count_by_type"),
+        )
+        .pivot(
+            index=SCHEDULE_DATE_COL,
+            on=SCHEDULE_TYPE_COL,
+            values=["registered_students_by_type", "event_count_by_type"],
+            aggregate_function="sum",
+        )
+    )
+    totals = (
+        normalized_schedule.group_by(SCHEDULE_DATE_COL)
+        .agg(
+            pl.sum(SCHEDULE_REGISTERED_COL).alias("registered_students_total"),
+            pl.n_unique(SCHEDULE_EVENT_ID_COL).alias("scheduled_event_count"),
+            pl.mean(SCHEDULE_REGISTERED_COL).alias("avg_registered_students_per_event"),
+        )
+        .sort(SCHEDULE_DATE_COL)
+    )
+    return totals.join(type_pivot, on=SCHEDULE_DATE_COL, how="left")
+
+
+def add_schedule_load_bucket(df: pl.DataFrame) -> pl.DataFrame:
+    """Bucket scheduled load using quantiles from positive-load days only."""
+
+    positive_load = df.filter(pl.col("registered_students_total") > 0)
+    if positive_load.is_empty():
+        return df.with_columns(schedule_load_bucket=pl.lit("no_scheduled_load"))
+
+    thresholds = positive_load.select(
+        low_max=pl.col("registered_students_total").quantile(0.33),
+        medium_max=pl.col("registered_students_total").quantile(0.66),
+    ).row(0, named=True)
+    low_max = thresholds["low_max"]
+    medium_max = thresholds["medium_max"]
+
+    return df.with_columns(
+        schedule_load_bucket=pl.when(pl.col("registered_students_total") <= 0)
+        .then(pl.lit("no_scheduled_load"))
+        .when(pl.col("registered_students_total") <= low_max)
+        .then(pl.lit("low"))
+        .when(pl.col("registered_students_total") <= medium_max)
+        .then(pl.lit("medium"))
+        .otherwise(pl.lit("high")),
+    )
+
+
+def compute_schedule_sales_effect(
+    daily_total_sales: pl.DataFrame,
+    daily_schedule_load: pl.DataFrame,
+) -> pl.DataFrame:
+    """Join daily sales to schedule pressure and bin days into comparable load groups."""
+
+    joined = (
+        daily_total_sales.join(daily_schedule_load, on=SALES_DATE_COL, how="left")
+        .with_columns(pl.col("registered_students_total").fill_null(0))
+    )
+    return add_schedule_load_bucket(joined)
+
+
+def summarize_schedule_sales_effect(schedule_sales_effect: pl.DataFrame) -> pl.DataFrame:
+    """Summarize average total demand by academic period and schedule-load bucket."""
+
+    return (
+        schedule_sales_effect.group_by("academic_bucket", "schedule_load_bucket")
+        .agg(
+            pl.len().alias("service_days"),
+            pl.mean("total_sales").alias("avg_sales"),
+            pl.median("total_sales").alias("median_sales"),
+            pl.mean("registered_students_total").alias("avg_registered_students_total"),
+        )
+        .sort("academic_bucket", "schedule_load_bucket")
+    )
+
+
+def compute_category_schedule_effect(
+    sales_with_calendar: pl.DataFrame,
+    daily_schedule_load: pl.DataFrame,
+) -> pl.DataFrame:
+    """Estimate how meal-category sales change with daily schedule pressure."""
+
+    daily_category_sales = build_daily_category_sales(sales_with_calendar)
+    joined = (
+        daily_category_sales.join(daily_schedule_load, on=SALES_DATE_COL, how="left")
+        .with_columns(pl.col("registered_students_total").fill_null(0))
+    )
+    return (
+        add_schedule_load_bucket(joined)
+        .group_by(SALES_CATEGORY_COL, "schedule_load_bucket")
+        .agg(
+            pl.len().alias("service_days_offered"),
+            pl.mean("category_sales").alias("avg_sales"),
+            pl.median("category_sales").alias("median_sales"),
+            pl.col("category_sales").quantile(0.25).alias("q25_sales"),
+            pl.col("category_sales").quantile(0.75).alias("q75_sales"),
+        )
+        .sort(SALES_CATEGORY_COL, "schedule_load_bucket")
+    )
+
+
+def compute_menu_popularity(sales: pl.DataFrame, meal_plan: pl.DataFrame) -> pl.DataFrame:
+    """Rank dishes by observed demand when offered.
+
+    This assumes sales.meal_category and meal_plan.meal_category are compatible.
+    If sales.name already equals the dish label, this join acts as a consistency
+    check; if sales only has category-level counts, this estimates dish/category
+    demand from the planned dish in that category.
+    """
+
+    normalized_sales = normalize_sales_frame(sales)
+    normalized_meal_plan = normalize_meal_plan_frame(meal_plan)
+    return (
+        normalized_sales.join(
+            normalized_meal_plan,
+            left_on=[SALES_DATE_COL, SALES_CATEGORY_COL],
+            right_on=[MEAL_PLAN_DATE_COL, MEAL_PLAN_CATEGORY_COL],
+            how="inner",
+        )
+        .group_by(MEAL_PLAN_DISH_COL, SALES_CATEGORY_COL, MEAL_PLAN_RECIPE_COL)
+        .agg(
+            pl.len().alias("offered_days"),
+            pl.sum(SALES_COUNT_COL).alias("total_sales"),
+            pl.mean(SALES_COUNT_COL).alias("avg_sales_when_offered"),
+            pl.median(SALES_COUNT_COL).alias("median_sales_when_offered"),
+        )
+        .sort("avg_sales_when_offered", descending=True)
+    )
+
+
+def build_daily_menu_mix(meal_plan: pl.DataFrame) -> pl.DataFrame:
+    """Aggregate meal-plan rows into daily offer-count features."""
+
+    normalized_meal_plan = normalize_meal_plan_frame(meal_plan)
+    return (
+        normalized_meal_plan.group_by(MEAL_PLAN_DATE_COL)
+        .agg(
+            pl.len().alias("offered_dish_count"),
+            pl.n_unique(MEAL_PLAN_CATEGORY_COL).alias("offered_category_count"),
+            pl.n_unique(MEAL_PLAN_RECIPE_COL).alias("offered_recipe_count"),
+        )
+        .sort(MEAL_PLAN_DATE_COL)
+    )
+
+
+def build_daily_waste(waste: pl.DataFrame) -> pl.DataFrame:
+    """Aggregate waste without mixing measurement units."""
+
+    normalized_waste = normalize_waste_frame(waste)
+    return (
+        normalized_waste.group_by(WASTE_DATE_COL, WASTE_INGREDIENT_COL, WASTE_UNIT_COL)
+        .agg(pl.sum(WASTE_QUANTITY_COL).alias("daily_waste_quantity"))
+        .sort(WASTE_DATE_COL, WASTE_INGREDIENT_COL, WASTE_UNIT_COL)
+    )
+
+
+def summarize_ingredient_unit_waste(daily_waste: pl.DataFrame) -> pl.DataFrame:
+    """Rank waste series by ingredient and unit without unit conversion."""
+
+    return (
+        daily_waste.group_by(WASTE_INGREDIENT_COL, WASTE_UNIT_COL)
+        .agg(
+            pl.len().alias("waste_recorded_days"),
+            pl.sum("daily_waste_quantity").alias("total_waste_quantity"),
+            pl.mean("daily_waste_quantity").alias("avg_daily_waste_quantity"),
+            pl.median("daily_waste_quantity").alias("median_daily_waste_quantity"),
+            pl.std("daily_waste_quantity").alias("std_daily_waste_quantity"),
+        )
+        .sort(["unit", "total_waste_quantity"], descending=[False, True])
+    )
+
+
+def compute_waste_calendar_effect(daily_waste: pl.DataFrame, calendar: pl.DataFrame) -> pl.DataFrame:
+    """Summarize ingredient-unit waste by weekday and academic period.
+
+    Missing ingredient-unit waste records are treated as zero waste on regular
+    service days in the observed waste date range.
+    """
+
+    if daily_waste.is_empty():
+        return pl.DataFrame(
+            schema={
+                WASTE_INGREDIENT_COL: pl.Utf8,
+                WASTE_UNIT_COL: pl.Utf8,
+                "weekday": pl.Utf8,
+                "academic_bucket": pl.Utf8,
+                "service_days": pl.UInt32,
+                "avg_waste_quantity": pl.Float64,
+                "median_waste_quantity": pl.Float64,
+                "q25_waste_quantity": pl.Float64,
+                "q75_waste_quantity": pl.Float64,
+            }
+        )
+
+    bounds = daily_waste.select(
+        min_date=pl.min(WASTE_DATE_COL),
+        max_date=pl.max(WASTE_DATE_COL),
+    ).row(0, named=True)
+    service_days = (
+        calendar.filter(
+            pl.col("is_regular_service_day")
+            & pl.col("day").is_between(bounds["min_date"], bounds["max_date"], closed="both")
+        )
+        .select(
+            pl.col("day").alias(WASTE_DATE_COL),
+            "weekday",
+            "academic_bucket",
+        )
+    )
+    ingredient_units = daily_waste.select(WASTE_INGREDIENT_COL, WASTE_UNIT_COL).unique()
+    full_waste_grid = (
+        service_days.join(ingredient_units, how="cross")
+        .join(
+            daily_waste,
+            on=[WASTE_DATE_COL, WASTE_INGREDIENT_COL, WASTE_UNIT_COL],
+            how="left",
+        )
+        .with_columns(pl.col("daily_waste_quantity").fill_null(0))
+    )
+
+    return (
+        full_waste_grid
+        .group_by(WASTE_INGREDIENT_COL, WASTE_UNIT_COL, "weekday", "academic_bucket")
+        .agg(
+            pl.len().alias("service_days"),
+            pl.mean("daily_waste_quantity").alias("avg_waste_quantity"),
+            pl.median("daily_waste_quantity").alias("median_waste_quantity"),
+            pl.col("daily_waste_quantity").quantile(0.25).alias("q25_waste_quantity"),
+            pl.col("daily_waste_quantity").quantile(0.75).alias("q75_waste_quantity"),
+        )
+        .sort(WASTE_INGREDIENT_COL, WASTE_UNIT_COL, "academic_bucket", "weekday")
+    )
+
+
+def build_recipe_ingredient_exposure(meal_plan: pl.DataFrame, recipes: pl.DataFrame) -> pl.DataFrame:
+    """Map planned menu days to recipe ingredient exposure.
+
+    Because recipe portion counts are unknown, this table is not a production
+    quantity estimate. It only says that an ingredient appeared on the menu and
+    records the raw recipe amount as a relative signal within the same unit.
+    """
+
+    normalized_meal_plan = normalize_meal_plan_frame(meal_plan)
+    normalized_recipes = normalize_recipe_frame(recipes)
+    return (
+        normalized_meal_plan.join(normalized_recipes, on=MEAL_PLAN_RECIPE_COL, how="inner")
+        .group_by(MEAL_PLAN_DATE_COL, RECIPE_INGREDIENT_COL, RECIPE_UNIT_COL)
+        .agg(
+            pl.n_unique(MEAL_PLAN_RECIPE_COL).alias("planned_recipe_count"),
+            pl.sum(RECIPE_AMOUNT_COL).alias("raw_recipe_amount_exposure"),
+        )
+        .sort(MEAL_PLAN_DATE_COL, RECIPE_INGREDIENT_COL, RECIPE_UNIT_COL)
+    )
+
+
+def compare_waste_when_ingredient_planned(
+    daily_waste: pl.DataFrame,
+    recipe_ingredient_exposure: pl.DataFrame,
+) -> pl.DataFrame:
+    """Compare waste on days where an ingredient-unit appears in planned recipes.
+
+    This join only matches identical ingredient names and identical units. Rows
+    with no matching recipe exposure are treated as "not planned in available
+    recipes", not proof that the ingredient was unused.
+    """
+
+    if daily_waste.is_empty() and recipe_ingredient_exposure.is_empty():
+        return pl.DataFrame(
+            schema={
+                WASTE_INGREDIENT_COL: pl.Utf8,
+                WASTE_UNIT_COL: pl.Utf8,
+                "ingredient_planned_in_available_recipes": pl.Boolean,
+                "days": pl.UInt32,
+                "avg_waste_quantity": pl.Float64,
+                "median_waste_quantity": pl.Float64,
+                "avg_planned_recipe_count": pl.Float64,
+            }
+        )
+
+    exposure = recipe_ingredient_exposure
+    observed_dates = pl.concat(
+        [
+            daily_waste.select(pl.col(WASTE_DATE_COL)),
+            exposure.select(pl.col(WASTE_DATE_COL)),
+        ],
+        how="vertical",
+    )
+    bounds = observed_dates.select(
+        min_date=pl.min(WASTE_DATE_COL),
+        max_date=pl.max(WASTE_DATE_COL),
+    ).row(0, named=True)
+    dates = pl.DataFrame(
+        {
+            WASTE_DATE_COL: pl.date_range(
+                bounds["min_date"],
+                bounds["max_date"],
+                interval="1d",
+                eager=True,
+            )
+        }
+    )
+    ingredient_units = pl.concat(
+        [
+            daily_waste.select(WASTE_INGREDIENT_COL, WASTE_UNIT_COL),
+            exposure.select(WASTE_INGREDIENT_COL, WASTE_UNIT_COL),
+        ],
+        how="vertical",
+    ).unique()
+
+    full_grid = (
+        dates.join(ingredient_units, how="cross")
+        .join(
+            daily_waste,
+            on=[WASTE_DATE_COL, WASTE_INGREDIENT_COL, WASTE_UNIT_COL],
+            how="left",
+        )
+        .join(
+            exposure,
+            on=[WASTE_DATE_COL, WASTE_INGREDIENT_COL, WASTE_UNIT_COL],
+            how="left",
+        )
+        .with_columns(
+            ingredient_planned_in_available_recipes=pl.col("planned_recipe_count").is_not_null(),
+            planned_recipe_count=pl.col("planned_recipe_count").fill_null(0),
+            raw_recipe_amount_exposure=pl.col("raw_recipe_amount_exposure").fill_null(0),
+            daily_waste_quantity=pl.col("daily_waste_quantity").fill_null(0),
+        )
+    )
+
+    return (
+        full_grid
+        .group_by(WASTE_INGREDIENT_COL, WASTE_UNIT_COL, "ingredient_planned_in_available_recipes")
+        .agg(
+            pl.len().alias("days"),
+            pl.mean("daily_waste_quantity").alias("avg_waste_quantity"),
+            pl.median("daily_waste_quantity").alias("median_waste_quantity"),
+            pl.col("daily_waste_quantity").quantile(0.25).alias("q25_waste_quantity"),
+            pl.col("daily_waste_quantity").quantile(0.75).alias("q75_waste_quantity"),
+            pl.mean("planned_recipe_count").alias("avg_planned_recipe_count"),
+        )
+        .sort(WASTE_INGREDIENT_COL, WASTE_UNIT_COL, "ingredient_planned_in_available_recipes")
+    )
+
+
+def compute_extended_demand_exploration(
+    sales: pl.DataFrame,
+    *,
+    schedule: pl.DataFrame | None = None,
+    meal_plan: pl.DataFrame | None = None,
+    waste: pl.DataFrame | None = None,
+    recipes: pl.DataFrame | None = None,
+    **calendar_kwargs: Any,
+) -> ExtendedDemandExploration:
+    """Compute a broader EDA for demand prediction and waste reduction.
+
+    Minimal required input is the existing sales table. Pass optional prepared
+    NDA tables as they become available:
+
+        schedule: see normalize_schedule_frame()
+        meal_plan: see normalize_meal_plan_frame()
+        waste: see normalize_waste_frame()
+        recipes: see normalize_recipe_frame()
+
+    Recommended analysis order:
+    1. Total demand baseline: weekday, semester, lecture-period effects.
+    2. Schedule pressure: does registered campus load explain sales residuals?
+    3. Menu mix: how much does offer breadth vary by day?
+    4. Waste concentration: which ingredient-unit series dominate waste?
+    5. Recipe bridge: which ingredient-unit waste increases when planned?
+    """
+
+    total_sales_analysis = compute_total_sales_analysis(sales, **calendar_kwargs)
+
+    daily_schedule_load = None
+    schedule_sales_effect = None
+    category_schedule_effect = None
+    if schedule is not None:
+        daily_schedule_load = build_daily_schedule_load(schedule)
+        schedule_sales_effect = compute_schedule_sales_effect(
+            total_sales_analysis.daily_total_sales,
+            daily_schedule_load,
+        )
+        category_schedule_effect = compute_category_schedule_effect(
+            total_sales_analysis.sales_with_calendar,
+            daily_schedule_load,
+        )
+
+    menu_popularity = None
+    daily_menu_mix = None
+    if meal_plan is not None:
+        daily_menu_mix = build_daily_menu_mix(meal_plan)
+
+    daily_waste = None
+    ingredient_unit_waste = None
+    waste_calendar_effect = None
+    if waste is not None:
+        daily_waste = build_daily_waste(waste)
+        ingredient_unit_waste = summarize_ingredient_unit_waste(daily_waste)
+        waste_calendar_effect = compute_waste_calendar_effect(
+            daily_waste,
+            total_sales_analysis.calendar,
+        )
+
+    recipe_ingredient_exposure = None
+    ingredient_waste_when_planned = None
+    if meal_plan is not None and recipes is not None:
+        recipe_ingredient_exposure = build_recipe_ingredient_exposure(meal_plan, recipes)
+        if daily_waste is not None:
+            ingredient_waste_when_planned = compare_waste_when_ingredient_planned(
+                daily_waste,
+                recipe_ingredient_exposure,
+            )
+
+    return ExtendedDemandExploration(
+        total_sales_analysis=total_sales_analysis,
+        daily_schedule_load=daily_schedule_load,
+        schedule_sales_effect=schedule_sales_effect,
+        category_schedule_effect=category_schedule_effect,
+        menu_popularity=menu_popularity,
+        daily_menu_mix=daily_menu_mix,
+        daily_waste=daily_waste,
+        ingredient_unit_waste=ingredient_unit_waste,
+        waste_calendar_effect=waste_calendar_effect,
+        recipe_ingredient_exposure=recipe_ingredient_exposure,
+        ingredient_waste_when_planned=ingredient_waste_when_planned,
+    )
