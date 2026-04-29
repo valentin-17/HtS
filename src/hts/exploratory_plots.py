@@ -9,6 +9,7 @@ import polars as pl
 from .exploratory_analysis import (
     ACADEMIC_BUCKET_ORDER,
     ExtendedDemandExploration,
+    SCHEDULE_PRESSURE_COL,
     SALES_CATEGORY_COL,
     SALES_DATE_COL,
     TotalSalesAnalysis,
@@ -261,7 +262,7 @@ def plot_total_sales_analysis(analysis: TotalSalesAnalysis) -> list[plt.Figure]:
 def plot_schedule_pressure(
     schedule_sales_effect: pl.DataFrame,
 ) -> tuple[plt.Figure, list[plt.Axes]]:
-    """Plot sales against daily registered-student load and bucket averages."""
+    """Plot sales against adjusted schedule pressure and compare proxy variants."""
 
     _set_style()
     summary = (
@@ -294,25 +295,35 @@ def plot_schedule_pressure(
     bucket_values = [row["avg_sales"] for row in bucket_rows]
     rows = schedule_sales_effect.to_dicts()
 
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    positive_proxy_days = schedule_sales_effect.filter(pl.col(SCHEDULE_PRESSURE_COL) > 0)
+    proxy_source = positive_proxy_days if not positive_proxy_days.is_empty() else schedule_sales_effect
+    proxy_means = proxy_source.select(
+        pl.mean("registered_students_raw").alias("Raw appointment sum"),
+        pl.mean("registered_students_course_deduplicated").alias("Course deduplicated"),
+        pl.mean("registered_students_parallel_adjusted").alias("Parallel adjusted"),
+        pl.mean("registered_students_time_weighted").alias("Raw time weighted"),
+        pl.mean(SCHEDULE_PRESSURE_COL).alias("Parallel adjusted + time weighted"),
+    ).to_dicts()[0]
+
+    fig, axes = plt.subplots(1, 3, figsize=(17, 5))
     lecture_rows = [row for row in rows if row.get("is_lecture_day")]
     free_rows = [row for row in rows if not row.get("is_lecture_day")]
     axes[0].scatter(
-        [row["registered_students_total"] for row in lecture_rows],
+        [row[SCHEDULE_PRESSURE_COL] for row in lecture_rows],
         [row["total_sales"] for row in lecture_rows],
         color="#4c78a8",
         alpha=0.7,
         label="Lecture days",
     )
     axes[0].scatter(
-        [row["registered_students_total"] for row in free_rows],
+        [row[SCHEDULE_PRESSURE_COL] for row in free_rows],
         [row["total_sales"] for row in free_rows],
         color="#f58518",
         alpha=0.7,
         label="Lecture-free days",
     )
-    axes[0].set_title("Daily Demand vs Scheduled Campus Load")
-    axes[0].set_xlabel("Registered students in scheduled events")
+    axes[0].set_title("Daily Demand vs Adjusted Schedule Pressure")
+    axes[0].set_xlabel("Parallel-adjusted time-weighted registered students")
     axes[0].set_ylabel("Dishes sold")
     axes[0].legend(frameon=False)
 
@@ -329,6 +340,16 @@ def plot_schedule_pressure(
     _bar_label_if_possible(axes[1])
     _add_n_labels(axes[1], bucket_rows)
 
+    axes[2].barh(
+        list(proxy_means.keys()),
+        list(proxy_means.values()),
+        color=["#bab0ac", "#9c755f", "#72b7b2", "#f58518", "#4c78a8"],
+    )
+    axes[2].set_title("Average Schedule Proxy Variants on Positive-Load Days")
+    axes[2].set_xlabel("Registered-student pressure")
+    axes[2].set_ylabel("")
+    _bar_label_if_possible(axes[2], "%.0f")
+
     fig.tight_layout()
     return fig, list(axes)
 
@@ -338,7 +359,7 @@ def plot_category_schedule_effect(
     *,
     top_n_categories: int = 8,
 ) -> tuple[plt.Figure, plt.Axes]:
-    """Plot category-level average sales by schedule-load bucket."""
+    """Plot category-level average sales by adjusted schedule-load bucket."""
 
     _set_style()
     top_categories = (
@@ -367,7 +388,7 @@ def plot_category_schedule_effect(
         ]
         ax.bar(positions, values, width=bar_width, label=bucket, color=colors[offset])
 
-    ax.set_title("Category Demand by Schedule-Load Bucket")
+    ax.set_title("Category Demand by Adjusted Schedule-Load Bucket")
     ax.set_xlabel("")
     ax.set_ylabel("Average dishes sold")
     ax.set_xticks(x_positions)

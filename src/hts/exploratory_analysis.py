@@ -16,7 +16,7 @@ calendar effects are computed.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -31,8 +31,14 @@ SALES_COUNT_COL = "sales"
 
 SCHEDULE_DATE_COL = "date"
 SCHEDULE_EVENT_ID_COL = "event_id"
+SCHEDULE_COURSE_ID_COL = "course_id"
+SCHEDULE_PARALLEL_GROUP_COL = "parallel_group_id"
 SCHEDULE_TYPE_COL = "event_type"
 SCHEDULE_REGISTERED_COL = "registered_students"
+SCHEDULE_TIME_WEIGHT_COL = "attendance_weight"
+SCHEDULE_PRESSURE_COL = "registered_students_parallel_adjusted_time_weighted"
+SCHEDULE_START_TIME_COL = "start_time"
+SCHEDULE_END_TIME_COL = "end_time"
 
 MEAL_PLAN_DATE_COL = "date"
 MEAL_PLAN_LOCATION_COL = "location"
@@ -346,41 +352,187 @@ def normalize_sales_frame(sales: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _parse_time_minutes(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.hour * 60 + value.minute
+    if isinstance(value, time):
+        return value.hour * 60 + value.minute
+
+    text = str(value).strip()
+    if not text:
+        return None
+    for separator in (":", "."):
+        if separator in text:
+            hour_text, minute_text, *_ = text.split(separator)
+            if hour_text.strip().isdigit() and minute_text.strip().isdigit():
+                hour = int(hour_text.strip())
+                minute = int(minute_text.strip()[:2])
+                if 0 <= hour <= 23 and 0 <= minute <= 59:
+                    return hour * 60 + minute
+                return None
+    if text.isdigit():
+        hour = int(text)
+        if 0 <= hour <= 23:
+            return hour * 60
+    return None
+
+
+def _attendance_weight_from_minutes(start_minutes: int, end_minutes: int) -> float:
+    relevant_start = 10 * 60
+    relevant_end = 16 * 60
+    if end_minutes <= start_minutes:
+        raise ValueError("Schedule end time must be after start time.")
+
+    overlaps_relevant_window = end_minutes > relevant_start and start_minutes < relevant_end
+    return 1.0 if overlaps_relevant_window else 0.5
+
+
 def normalize_schedule_frame(schedule: pl.DataFrame) -> pl.DataFrame:
     """Normalize prepared university schedule rows.
 
-    Expected input schema:
+    Supported input schema:
 
-        date: date-like value of the lecture/tutorial day
-        event_id: stable lecture/tutorial identifier; unique per scheduled event is ideal
+        date: concrete appointment date after expanding weekly, biweekly,
+            block-course, and single-appointment schedules
+        event_id: stable appointment-row identifier; unique per concrete
+            scheduled appointment
+        course_id: stable course identifier shared by all appointments that
+            belong to the same course/module
         event_type: string such as "lecture", "tutorial", "seminar", "exam", "event"
-        registered_students: numeric count of registered students for that event
+        registered_students: numeric count of registered students for the
+            course/appointment as reported in the source system
+        start_time, end_time: appointment start/end times. ``attendance_weight``
+            is always derived from the 10:00-16:00 cafeteria-relevant window:
+            1.0 for any overlap, otherwise 0.5.
+
+    Optional parallel-group column:
+
+        parallel_group_id: identifier for known mutually exclusive parallel
+            appointments where students only attend one option. If this column
+            is missing or null, every concrete appointment is treated as its own
+            appointment and no parallel relationship is inferred.
+
+    Recommended preparation before passing the table:
+
+        1. Expand all schedule patterns to one row per concrete appointment date.
+        2. Do not infer cross-day parallel alternatives from weak signals such
+           as similar registration counts or similar names.
+        3. Leave parallel_group_id missing/null unless the raw data explicitly
+           identifies a true alternative group.
+        4. Only deduplicate obvious exact export duplicates before this step,
+           for example identical date, course_id, event_type, start_time,
+           end_time, room, and registered_students.
 
     Optional columns are ignored by this module but useful for later modeling:
-    start_time, end_time, faculty, campus, room, course_id, degree_program.
+    faculty, campus, room, degree_program, schedule_type.
 
-    The analysis treats registered_students as a demand-pressure proxy, not as
-    literal cafeteria attendance. If one course has multiple parallel tutorials,
-    keep each tutorial as a separate row only if students are registered to that
-    tutorial separately; otherwise de-duplicate before passing the table in.
+    The analysis treats all registration-derived columns as demand-pressure
+    proxies, not as literal cafeteria attendance.
     """
 
+    required_columns = {
+        SCHEDULE_DATE_COL,
+        SCHEDULE_EVENT_ID_COL,
+        SCHEDULE_COURSE_ID_COL,
+        SCHEDULE_TYPE_COL,
+        SCHEDULE_REGISTERED_COL,
+        SCHEDULE_START_TIME_COL,
+        SCHEDULE_END_TIME_COL,
+    }
     validate_columns(
         schedule,
-        {
-            SCHEDULE_DATE_COL,
-            SCHEDULE_EVENT_ID_COL,
-            SCHEDULE_TYPE_COL,
-            SCHEDULE_REGISTERED_COL,
-        },
+        required_columns,
         "schedule",
     )
-    return schedule.with_columns(
-        pl.col(SCHEDULE_DATE_COL).cast(pl.Date),
-        pl.col(SCHEDULE_EVENT_ID_COL).cast(pl.Utf8),
-        pl.col(SCHEDULE_TYPE_COL).cast(pl.Utf8),
-        pl.col(SCHEDULE_REGISTERED_COL).cast(pl.Float64),
+    if SCHEDULE_PARALLEL_GROUP_COL in schedule.columns:
+        schedule_prepared = schedule
+    else:
+        schedule_prepared = schedule.with_columns(
+            pl.lit(None, dtype=pl.Utf8).alias(SCHEDULE_PARALLEL_GROUP_COL)
+        )
+
+    schedule_with_row_id = schedule_prepared.with_row_index("__schedule_row")
+    weight_rows = []
+    for row in schedule_with_row_id.select(
+        "__schedule_row",
+        SCHEDULE_EVENT_ID_COL,
+        SCHEDULE_START_TIME_COL,
+        SCHEDULE_END_TIME_COL,
+    ).to_dicts():
+        start_minutes = _parse_time_minutes(row[SCHEDULE_START_TIME_COL])
+        end_minutes = _parse_time_minutes(row[SCHEDULE_END_TIME_COL])
+        if start_minutes is None or end_minutes is None:
+            raise ValueError(
+                "Could not derive attendance_weight from start_time/end_time "
+                f"for event_id={row[SCHEDULE_EVENT_ID_COL]!r}."
+            )
+        weight_rows.append(
+            {
+                "__schedule_row": row["__schedule_row"],
+                SCHEDULE_TIME_WEIGHT_COL: _attendance_weight_from_minutes(
+                    start_minutes,
+                    end_minutes,
+                ),
+            }
+        )
+    normalized = (
+        schedule_with_row_id.drop(SCHEDULE_TIME_WEIGHT_COL, strict=False)
+        .join(
+            pl.DataFrame(
+                weight_rows,
+                schema={
+                    "__schedule_row": pl.UInt32,
+                    SCHEDULE_TIME_WEIGHT_COL: pl.Float64,
+                },
+            ),
+            on="__schedule_row",
+            how="left",
+        )
+        .with_columns(pl.col(SCHEDULE_EVENT_ID_COL).cast(pl.Utf8))
+        .with_columns(
+            pl.col(SCHEDULE_DATE_COL).cast(pl.Date),
+            pl.col(SCHEDULE_EVENT_ID_COL).cast(pl.Utf8),
+            pl.col(SCHEDULE_COURSE_ID_COL).cast(pl.Utf8),
+            pl.col(SCHEDULE_PARALLEL_GROUP_COL).cast(pl.Utf8).str.strip_chars(),
+            pl.col(SCHEDULE_TYPE_COL).cast(pl.Utf8),
+            pl.col(SCHEDULE_REGISTERED_COL).cast(pl.Float64).fill_null(0),
+            pl.col(SCHEDULE_TIME_WEIGHT_COL).cast(pl.Float64).fill_null(0),
+        )
+        .with_columns(
+            pl.col(SCHEDULE_TIME_WEIGHT_COL).clip(0, 1),
+            parallel_group_id_normalized=pl.when(
+                pl.col(SCHEDULE_PARALLEL_GROUP_COL).is_null()
+                | (pl.col(SCHEDULE_PARALLEL_GROUP_COL) == "")
+            )
+            .then(pl.lit(None, dtype=pl.Utf8))
+            .otherwise(pl.col(SCHEDULE_PARALLEL_GROUP_COL)),
+        )
+        .with_columns(
+            effective_parallel_group_id=pl.when(pl.col("parallel_group_id_normalized").is_null())
+            .then(pl.col(SCHEDULE_EVENT_ID_COL))
+            .otherwise(pl.col("parallel_group_id_normalized")),
+        )
+        .with_columns(
+            registered_students_time_weighted=(
+                pl.col(SCHEDULE_REGISTERED_COL) * pl.col(SCHEDULE_TIME_WEIGHT_COL)
+            ),
+        )
+        .drop("__schedule_row")
     )
+    negative_rows = normalized.filter(pl.col(SCHEDULE_REGISTERED_COL) < 0)
+    if not negative_rows.is_empty():
+        examples = negative_rows.select(
+            SCHEDULE_EVENT_ID_COL,
+            SCHEDULE_COURSE_ID_COL,
+            SCHEDULE_REGISTERED_COL,
+        ).head(5)
+        raise ValueError(
+            "Schedule contains negative registered_students values: "
+            f"{examples.to_dicts()}"
+        )
+    return normalized
 
 
 def normalize_meal_plan_frame(meal_plan: pl.DataFrame) -> pl.DataFrame:
@@ -709,54 +861,133 @@ def run_total_sales_analysis(
 
 
 def build_daily_schedule_load(schedule: pl.DataFrame) -> pl.DataFrame:
-    """Aggregate university schedule rows to a daily campus demand-pressure proxy."""
+    """Aggregate schedule rows to daily campus demand-pressure proxies.
+
+    Main output columns:
+
+        registered_students_raw: sum across all appointment rows; upper bound
+        registered_students_course_deduplicated: one registration count per
+            course/day, using max registered_students
+        registered_students_parallel_adjusted: one registration count per
+            course/day/parallel group, using max registered_students
+        registered_students_time_weighted: raw appointment sum multiplied by
+            attendance_weight
+        registered_students_parallel_adjusted_time_weighted: default pressure
+            proxy used for bucketed analysis and plots
+    """
 
     normalized_schedule = normalize_schedule_frame(schedule)
-    type_pivot = (
-        normalized_schedule.group_by(SCHEDULE_DATE_COL, SCHEDULE_TYPE_COL)
+    parallel_adjusted_rows = (
+        normalized_schedule.group_by(
+            SCHEDULE_DATE_COL,
+            SCHEDULE_COURSE_ID_COL,
+            "effective_parallel_group_id",
+            SCHEDULE_TYPE_COL,
+        )
         .agg(
-            pl.sum(SCHEDULE_REGISTERED_COL).alias("registered_students_by_type"),
-            pl.n_unique(SCHEDULE_EVENT_ID_COL).alias("event_count_by_type"),
+            pl.max(SCHEDULE_REGISTERED_COL).alias("parallel_adjusted_registered_students"),
+            pl.max("registered_students_time_weighted").alias(
+                "parallel_adjusted_registered_students_time_weighted"
+            ),
+            pl.n_unique(SCHEDULE_EVENT_ID_COL).alias("appointment_rows_in_parallel_group"),
+            pl.mean(SCHEDULE_TIME_WEIGHT_COL).alias("avg_parallel_group_time_weight"),
+        )
+    )
+    course_deduplicated_rows = (
+        normalized_schedule.group_by(SCHEDULE_DATE_COL, SCHEDULE_COURSE_ID_COL)
+        .agg(
+            pl.max(SCHEDULE_REGISTERED_COL).alias("course_deduplicated_registered_students"),
+            pl.max("registered_students_time_weighted").alias(
+                "course_deduplicated_registered_students_time_weighted"
+            ),
+        )
+    )
+    type_pivot = (
+        parallel_adjusted_rows.group_by(SCHEDULE_DATE_COL, SCHEDULE_TYPE_COL)
+        .agg(
+            pl.sum("parallel_adjusted_registered_students").alias(
+                "parallel_adjusted_registered_students_by_type"
+            ),
+            pl.sum("parallel_adjusted_registered_students_time_weighted").alias(
+                "parallel_adjusted_time_weighted_registered_students_by_type"
+            ),
+            pl.len().alias("parallel_group_count_by_type"),
         )
         .pivot(
             index=SCHEDULE_DATE_COL,
             on=SCHEDULE_TYPE_COL,
-            values=["registered_students_by_type", "event_count_by_type"],
+            values=[
+                "parallel_adjusted_registered_students_by_type",
+                "parallel_adjusted_time_weighted_registered_students_by_type",
+                "parallel_group_count_by_type",
+            ],
             aggregate_function="sum",
         )
     )
-    totals = (
+    appointment_totals = (
         normalized_schedule.group_by(SCHEDULE_DATE_COL)
         .agg(
-            pl.sum(SCHEDULE_REGISTERED_COL).alias("registered_students_total"),
+            pl.sum(SCHEDULE_REGISTERED_COL).alias("registered_students_raw"),
+            pl.sum("registered_students_time_weighted").alias("registered_students_time_weighted"),
             pl.n_unique(SCHEDULE_EVENT_ID_COL).alias("scheduled_event_count"),
+            pl.n_unique(SCHEDULE_COURSE_ID_COL).alias("scheduled_course_count"),
+            pl.n_unique("effective_parallel_group_id").alias("parallel_group_count"),
             pl.mean(SCHEDULE_REGISTERED_COL).alias("avg_registered_students_per_event"),
+            pl.mean(SCHEDULE_TIME_WEIGHT_COL).alias("avg_attendance_weight"),
         )
+    )
+    course_totals = (
+        course_deduplicated_rows.group_by(SCHEDULE_DATE_COL)
+        .agg(
+            pl.sum("course_deduplicated_registered_students").alias(
+                "registered_students_course_deduplicated"
+            ),
+            pl.sum("course_deduplicated_registered_students_time_weighted").alias(
+                "registered_students_course_deduplicated_time_weighted"
+            ),
+        )
+    )
+    parallel_totals = (
+        parallel_adjusted_rows.group_by(SCHEDULE_DATE_COL)
+        .agg(
+            pl.sum("parallel_adjusted_registered_students").alias(
+                "registered_students_parallel_adjusted"
+            ),
+            pl.sum("parallel_adjusted_registered_students_time_weighted").alias(
+                SCHEDULE_PRESSURE_COL
+            ),
+            pl.sum("appointment_rows_in_parallel_group").alias("scheduled_event_count_after_grouping"),
+            pl.mean("avg_parallel_group_time_weight").alias("avg_parallel_adjusted_time_weight"),
+        )
+    )
+    return (
+        appointment_totals.join(course_totals, on=SCHEDULE_DATE_COL, how="left")
+        .join(parallel_totals, on=SCHEDULE_DATE_COL, how="left")
+        .join(type_pivot, on=SCHEDULE_DATE_COL, how="left")
         .sort(SCHEDULE_DATE_COL)
     )
-    return totals.join(type_pivot, on=SCHEDULE_DATE_COL, how="left")
 
 
 def add_schedule_load_bucket(df: pl.DataFrame) -> pl.DataFrame:
     """Bucket scheduled load using quantiles from positive-load days only."""
 
-    positive_load = df.filter(pl.col("registered_students_total") > 0)
+    positive_load = df.filter(pl.col(SCHEDULE_PRESSURE_COL) > 0)
     if positive_load.is_empty():
         return df.with_columns(schedule_load_bucket=pl.lit("no_scheduled_load"))
 
     thresholds = positive_load.select(
-        low_max=pl.col("registered_students_total").quantile(0.33),
-        medium_max=pl.col("registered_students_total").quantile(0.66),
+        low_max=pl.col(SCHEDULE_PRESSURE_COL).quantile(0.33),
+        medium_max=pl.col(SCHEDULE_PRESSURE_COL).quantile(0.66),
     ).row(0, named=True)
     low_max = thresholds["low_max"]
     medium_max = thresholds["medium_max"]
 
     return df.with_columns(
-        schedule_load_bucket=pl.when(pl.col("registered_students_total") <= 0)
+        schedule_load_bucket=pl.when(pl.col(SCHEDULE_PRESSURE_COL) <= 0)
         .then(pl.lit("no_scheduled_load"))
-        .when(pl.col("registered_students_total") <= low_max)
+        .when(pl.col(SCHEDULE_PRESSURE_COL) <= low_max)
         .then(pl.lit("low"))
-        .when(pl.col("registered_students_total") <= medium_max)
+        .when(pl.col(SCHEDULE_PRESSURE_COL) <= medium_max)
         .then(pl.lit("medium"))
         .otherwise(pl.lit("high")),
     )
@@ -770,7 +1001,13 @@ def compute_schedule_sales_effect(
 
     joined = (
         daily_total_sales.join(daily_schedule_load, on=SALES_DATE_COL, how="left")
-        .with_columns(pl.col("registered_students_total").fill_null(0))
+        .with_columns(
+            pl.col("registered_students_raw").fill_null(0),
+            pl.col("registered_students_course_deduplicated").fill_null(0),
+            pl.col("registered_students_parallel_adjusted").fill_null(0),
+            pl.col("registered_students_time_weighted").fill_null(0),
+            pl.col(SCHEDULE_PRESSURE_COL).fill_null(0),
+        )
     )
     return add_schedule_load_bucket(joined)
 
@@ -784,7 +1021,11 @@ def summarize_schedule_sales_effect(schedule_sales_effect: pl.DataFrame) -> pl.D
             pl.len().alias("service_days"),
             pl.mean("total_sales").alias("avg_sales"),
             pl.median("total_sales").alias("median_sales"),
-            pl.mean("registered_students_total").alias("avg_registered_students_total"),
+            pl.mean(SCHEDULE_PRESSURE_COL).alias("avg_schedule_pressure"),
+            pl.mean("registered_students_raw").alias("avg_registered_students_raw"),
+            pl.mean("registered_students_parallel_adjusted").alias(
+                "avg_registered_students_parallel_adjusted"
+            ),
         )
         .sort("academic_bucket", "schedule_load_bucket")
     )
@@ -799,7 +1040,13 @@ def compute_category_schedule_effect(
     daily_category_sales = build_daily_category_sales(sales_with_calendar)
     joined = (
         daily_category_sales.join(daily_schedule_load, on=SALES_DATE_COL, how="left")
-        .with_columns(pl.col("registered_students_total").fill_null(0))
+        .with_columns(
+            pl.col("registered_students_raw").fill_null(0),
+            pl.col("registered_students_course_deduplicated").fill_null(0),
+            pl.col("registered_students_parallel_adjusted").fill_null(0),
+            pl.col("registered_students_time_weighted").fill_null(0),
+            pl.col(SCHEDULE_PRESSURE_COL).fill_null(0),
+        )
     )
     return (
         add_schedule_load_bucket(joined)

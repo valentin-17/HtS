@@ -24,3 +24,5 @@
 - ÖPNV Situation -> bekommen wir da gute Daten?
 
 # Feature Engineering Ideen
+- wir können vermutlich keine anmeldezahlen verwenden, da diese erst im Nachhinein verfügbar sind oder die uni die überhaupt nicht rausgibt für die mensa
+- 
