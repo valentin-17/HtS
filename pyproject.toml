@@ -8,6 +8,8 @@ dependencies = [
     "matplotlib>=3.10.9",
     "pandas>=3.0.2",
     "polars>=1.40.1",
+    "scikit-learn>=1.7.0",
+    "statsmodels>=0.14.4",
 ]
 
 [tool.uv]
