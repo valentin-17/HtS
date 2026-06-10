@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}{{ the_day.strftime('%d.%m.%Y') }} – Mensa Uni Trier{% endblock %}
+
+{% block content %}
+{% include "_view_tabs.html" %}
+<div class="sw-toolbar">
+    <div class="sw-toolbar__title">
+        <h1>{{ feature.weekday or '' }}, {{ the_day.strftime('%d.%m.%Y') }}{% if the_day == current_day %}<span class="sw-today-badge">Heute</span>{% endif %}</h1>
+        <p class="sw-muted">
+            KW {{ week[1] }}
+            {% if feature.academic_bucket %} &middot; {{ feature.academic_bucket }}{% endif %}
+            {% if feature.is_public_holiday %} &middot; Feiertag: {{ feature.public_holiday_name }}{% endif %}
+        </p>
+    </div>
+    <div class="sw-toolbar__actions">
+        <a class="sw-btn sw-btn--ghost" href="{{ url_for('main.day_view', day=prev_day.isoformat()) }}">&lsaquo; Tag</a>
+        <a class="sw-btn sw-btn--ghost" href="{{ url_for('main.day_view', day=next_day.isoformat()) }}">Tag &rsaquo;</a>
+        <a class="sw-btn" href="{{ url_for('main.day_view', day=current_day.isoformat()) }}">Heute</a>
+        <a class="sw-btn sw-btn--ghost" href="{{ url_for('main.week_view', year=week[0], week=week[1]) }}">Woche</a>
+        <a class="sw-btn sw-btn--ghost" href="{{ url_for('main.month_view', year=month[0], month=month[1]) }}">Monat</a>
+    </div>
+</div>
+
+{% if excluded %}
+<div class="sw-card sw-muted">
+    Geschlossen – an Wochenenden und Feiertagen findet kein Mensa-Betrieb statt; es liegen keine
+    Verkaufsdaten vor.
+</div>
+{% else %}
+
+{% if feature.weather_category or feature.apparent_temperature_mean is not none %}
+<div class="sw-weatherbar">
+    {% if feature.apparent_temperature_mean is not none %}
+        <span>🌡️ {{ '%.1f'|format(feature.apparent_temperature_mean) }} °C (gefühlt)</span>{% endif %}
+    {% if feature.sunshine_duration is not none %}
+        <span>☀️ {{ '%.1f'|format(feature.sunshine_duration) }} h Sonne</span>{% endif %}
+    {% if feature.precipitation_sum is not none %}
+        <span>🌧️ {{ '%.1f'|format(feature.precipitation_sum) }} mm</span>{% endif %}
+    {% if feature.weather_category %}<span>Kategorie: {{ feature.weather_category }}</span>{% endif %}
+</div>
+{% endif %}
+
+<table class="sw-table">
+    <thead>
+        <tr>
+            <th>Prod.Art</th>
+            <th>Rezeptur</th>
+            <th class="sw-table__num">Ist-Menge</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for cat in categories %}
+            {% if cat.entries %}
+                {% for e in cat.entries %}
+                <tr>
+                    {% if loop.first %}
+                    <td rowspan="{{ cat.entries|length }}" class="sw-table__cat">{{ cat.category }}</td>
+                    {% endif %}
+                    <td>{% if cat.unknown %}<strong>{{ e.prod_art }}</strong> – {% endif %}{{ e.rezeptur or '–' }}</td>
+                    <td class="sw-table__num">{{ e.ist_menge | menge }}</td>
+                </tr>
+                {% endfor %}
+            {% else %}
+                <tr class="sw-table__empty">
+                    <td class="sw-table__cat">{{ cat.category }}</td>
+                    <td class="sw-muted">N/A</td>
+                    <td class="sw-table__num sw-muted">N/A</td>
+                </tr>
+            {% endif %}
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endblock %}

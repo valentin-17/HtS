@@ -1,5 +1,5 @@
 """
-Run with: streamlit run src/hts_nda/dish_sales_plot.py
+Run with: streamlit run src/hts/dish_sales_plot.py
 """
 
 import streamlit as st

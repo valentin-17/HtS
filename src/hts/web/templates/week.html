@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}KW {{ week }} / {{ year }} – Mensa Uni Trier{% endblock %}
+
+{% block content %}
+{% include "_view_tabs.html" %}
+<div class="sw-toolbar">
+    <div class="sw-toolbar__title">
+        <h1>Kalenderwoche {{ week }} <span class="sw-muted">/ {{ year }}</span></h1>
+    </div>
+    <div class="sw-toolbar__actions">
+        <a class="sw-btn sw-btn--ghost" href="{{ url_for('main.week_view', year=prev_week[0], week=prev_week[1]) }}">&lsaquo; Woche</a>
+        <a class="sw-btn sw-btn--ghost" href="{{ url_for('main.week_view', year=next_week[0], week=next_week[1]) }}">Woche &rsaquo;</a>
+        <a class="sw-btn" href="{{ url_for('main.week_view', year=current_week[0], week=current_week[1]) }}">Heute</a>
+        <a class="sw-btn sw-btn--ghost" href="{{ url_for('main.month_view', year=month_of_week[0], month=month_of_week[1]) }}">Zur Monatsansicht</a>
+    </div>
+</div>
+
+<div class="sw-week">
+    {% for day in days %}
+    <div class="sw-week__col {{ 'sw-week__col--today' if day.date == current_day else '' }}">
+        <div class="sw-week__head {{ 'sw-day--holiday' if day.feature.is_public_holiday else '' }}">
+            <a href="{{ url_for('main.day_view', day=day.date.isoformat()) }}">
+                <strong>{{ day.feature.weekday or '' }}</strong>
+                <span>{{ '%02d.%02d.'|format(day.date.day, day.date.month) }}</span>
+            </a>
+            {% if day.feature.is_public_holiday %}<span class="sw-day__badge">{{ day.feature.public_holiday_name }}</span>{% endif %}
+        </div>
+        <div class="sw-week__body">
+            {% if day.excluded %}
+            <div class="sw-menu__row sw-muted">Geschlossen</div>
+            {% else %}
+            {% for menu in day.menus %}
+            <div class="sw-menu">
+                <div class="sw-menu__cat">{{ menu.category }}</div>
+                {% if menu.entries %}
+                    {% for e in menu.entries %}
+                    <div class="sw-menu__row">
+                        <span class="sw-menu__rez">{% if menu.unknown %}<strong>{{ e.prod_art }}</strong> – {% endif %}{{ e.rezeptur or '–' }}</span>
+                        <span class="sw-menu__val">{{ e.ist_menge | menge }}</span>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <div class="sw-menu__row sw-muted">N/A</div>
+                {% endif %}
+            </div>
+            {% endfor %}
+            {% endif %}
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+<section class="sw-card sw-forecast">
+    <h2 class="sw-forecast__title">Prognose-Vorschau (Mock-up)</h2>
+    <img class="sw-forecast__img" src="{{ forecast_img_menu1 }}"
+         alt="Prognose-Mockup Menü 1 (Beispiel KW 25)">
+    <img class="sw-forecast__img" src="{{ forecast_img_menu2 }}"
+         alt="Prognose-Mockup Menü 2 (Beispiel KW 25)">
+    <p class="sw-muted">Beispielhafte Darstellung mit synthetischen Werten für Menü 1 und Menü 2 –
+        sie zeigt, wie eine Wochenprognose mit Konfidenzintervall (Upper/Lower) und
+        10-Tage-Durchschnitt aussehen könnte. Menü 1 wird im Schnitt rund 100 Portionen mehr verkauft
+        als Menü 2. Es handelt sich nicht um echte Prognosewerte.</p>
+</section>
+{% endblock %}

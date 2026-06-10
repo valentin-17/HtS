@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Datenanalyse – Mensa Uni Trier{% endblock %}
+{% block head %}<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>{% endblock %}
+
+{% block content %}
+<div class="sw-toolbar">
+    <div class="sw-toolbar__title"><h1>Datenanalyse</h1></div>
+</div>
+
+{% if plots %}
+    <div class="sw-plots">
+        {% for plot in plots %}
+        <section class="sw-plot-card">
+            {{ plot.html | safe }}
+        </section>
+        {% endfor %}
+    </div>
+{% else %}
+    <p class="sw-muted">Noch keine Verkaufsdaten vorhanden. Bitte zuerst Daten
+        <a href="{{ url_for('main.upload') }}">hochladen</a>.</p>
+{% endif %}
+{% endblock %}

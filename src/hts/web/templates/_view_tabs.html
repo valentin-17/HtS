@@ -1,0 +1,10 @@
+{# Sekundäre View-Reiter: Wechsel zwischen Monat/Woche/Tag. Erwartet `anchor` (date). #}
+{% set iso = anchor.isocalendar() %}
+<nav class="sw-subtabs">
+  <a class="sw-subtab {{ 'sw-subtab--active' if request.endpoint == 'main.month_view' else '' }}"
+     href="{{ url_for('main.month_view', year=anchor.year, month=anchor.month) }}">Monat</a>
+  <a class="sw-subtab {{ 'sw-subtab--active' if request.endpoint == 'main.week_view' else '' }}"
+     href="{{ url_for('main.week_view', year=iso.year, week=iso.week) }}">Woche</a>
+  <a class="sw-subtab {{ 'sw-subtab--active' if request.endpoint == 'main.day_view' else '' }}"
+     href="{{ url_for('main.day_view', day=anchor.isoformat()) }}">Tag</a>
+</nav>

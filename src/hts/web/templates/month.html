@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}{{ month_name }} {{ year }} – Mensa Uni Trier{% endblock %}
+
+{% block content %}
+{% include "_view_tabs.html" %}
+<div class="sw-toolbar">
+    <div class="sw-toolbar__title">
+        <h1>{{ month_name }} {{ year }}</h1>
+    </div>
+    <div class="sw-toolbar__actions">
+        <a class="sw-btn" href="{{ url_for('main.month_view', year=nav.one_year[0], month=nav.one_year[1]) }}">&laquo; 1 Jahr zurück</a>
+        <a class="sw-btn" href="{{ url_for('main.month_view', year=nav.half_year[0], month=nav.half_year[1]) }}">&laquo; 6 Monate zurück</a>
+        <a class="sw-btn sw-btn--ghost" href="{{ url_for('main.month_view', year=nav.prev[0], month=nav.prev[1]) }}">&lsaquo; Monat</a>
+        <a class="sw-btn sw-btn--ghost" href="{{ url_for('main.month_view', year=nav.next[0], month=nav.next[1]) }}">Monat &rsaquo;</a>
+        <a class="sw-btn" href="{{ url_for('main.month_view', year=current_day.year, month=current_day.month) }}">Heute</a>
+        <a class="sw-btn sw-btn--ghost" href="{{ url_for('main.upload') }}">Daten hochladen</a>
+        <form method="post" action="{{ url_for('main.refresh_weather_route') }}" class="sw-inline-form">
+            <input type="hidden" name="return_to" value="{{ request.path }}">
+            <button class="sw-btn sw-btn--ghost" type="submit">Wetter aktualisieren</button>
+        </form>
+    </div>
+</div>
+
+<table class="sw-calendar">
+    <thead>
+        <tr>
+            <th class="sw-calendar__kw">KW</th>
+            {% for wd in weekday_headers %}<th>{{ wd }}</th>{% endfor %}
+        </tr>
+    </thead>
+    <tbody>
+        {% for week in weeks %}
+        <tr>
+            <td class="sw-calendar__kw">{{ week.kw }}</td>
+            {% for day in week.days %}
+            {% set f = day.feature %}
+            <td class="sw-day
+                {{ 'sw-day--out' if not day.in_month else '' }}
+                {{ 'sw-day--weekend' if f.is_weekend else '' }}
+                {{ 'sw-day--holiday' if f.is_public_holiday else '' }}
+                {{ 'sw-day--today' if day.date == current_day else '' }}">
+                <a class="sw-day__link" href="{{ url_for('main.day_view', day=day.date.isoformat()) }}">
+                    <div class="sw-day__head">
+                        <span class="sw-day__num">{{ day.date.day }}</span>
+                        {% if f.is_public_holiday %}<span class="sw-day__badge" title="{{ f.public_holiday_name }}">Feiertag</span>{% endif %}
+                    </div>
+                    <div class="sw-day__body">
+                        {% if not day.excluded %}
+                        {% for item in day.preview %}
+                            <div class="sw-preview">
+                                <span class="sw-preview__cat">{{ item.category }}</span>
+                                <span class="sw-preview__val">{{ item.ist_menge | menge }}</span>
+                            </div>
+                        {% endfor %}
+                        {% endif %}
+                    </div>
+                </a>
+            </td>
+            {% endfor %}
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

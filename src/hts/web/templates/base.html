@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Mensa Uni Trier{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/studiwerk.css') }}">
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <header class="sw-header">
+        <div class="sw-header__inner">
+            <div class="sw-brand">
+                <span class="sw-brand__mark">Studierendenwerk Trier</span>
+                <span class="sw-brand__title">Mensa Tarforst &middot; Nachfragedaten</span>
+            </div>
+            <nav class="sw-tabs">
+                {% set kalender_active = request.endpoint in
+                    ['main.month_view', 'main.week_view', 'main.day_view', 'main.upload', 'main.index'] %}
+                <a class="sw-tab {{ 'sw-tab--active' if kalender_active else '' }}"
+                   href="{{ url_for('main.index') }}">Kalender</a>
+                <a class="sw-tab {{ 'sw-tab--active' if request.endpoint == 'main.analyse' else '' }}"
+                   href="{{ url_for('main.analyse') }}">Datenanalyse</a>
+            </nav>
+        </div>
+    </header>
+
+    <main class="sw-main">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="sw-flash-wrap">
+                    {% for category, message in messages %}
+                        <div class="sw-flash sw-flash--{{ category }}">{{ message }}</div>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="sw-footer">
+        <span>Lokale Anwendung &middot; Daten: Produktions-/Ausgabemengen Mensa Tarforst</span>
+    </footer>
+</body>
+</html>
