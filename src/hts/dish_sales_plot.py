@@ -16,8 +16,8 @@ st.title('Mensa Data Dashboard')
 segment_colors = {
     'Konsistent starke Verkäufe': '#53A12E',
     'Konsistent schwache Verkäufe': '#D02525',
-    'Beliebt aber volatil': '#F3B700',
-    'Niedrig und unvorhersehbar': '#3F92D2',
+    'Beliebt aber volatil': '#3F92D2',
+    'Niedrig und unvorhersehbar': '#F3B700',
     'Mittlerer Bereich': '#9E9E9E',
 }
 
@@ -79,12 +79,16 @@ def compute_dish_stats(
         )
     )
 
-def add_segments(dish_stats: pl.DataFrame) -> tuple[pl.DataFrame, dict]:
+def add_segments(
+    dish_stats: pl.DataFrame,
+    sales_cutoff_quantiles: tuple[float, float],
+    cv_cutoff_quantiles: tuple[float, float],
+) -> tuple[pl.DataFrame, dict]:
     cutoffs = dish_stats.select([
-        pl.col('avg_sold').quantile(0.75).alias('high_sales_cutoff'),
-        pl.col('avg_sold').quantile(0.25).alias('low_sales_cutoff'),
-        pl.col('cv').quantile(0.25).alias('stable_cutoff'),
-        pl.col('cv').quantile(0.75).alias('unstable_cutoff'),
+        pl.col('avg_sold').quantile(sales_cutoff_quantiles[1]).alias('high_sales_cutoff'),
+        pl.col('avg_sold').quantile(sales_cutoff_quantiles[0]).alias('low_sales_cutoff'),
+        pl.col('cv').quantile(cv_cutoff_quantiles[0]).alias('stable_cutoff'),
+        pl.col('cv').quantile(cv_cutoff_quantiles[1]).alias('unstable_cutoff'),
     ]).row(0, named=True)
 
     dish_segments = (
@@ -168,6 +172,22 @@ min_total_sold_quantile = st.slider(
     step=0.05,
 )
 
+sales_cutoff_quantiles = st.slider(
+    'Grenzen Durchschnittliche Verkäufe/Tag (Quantile)',
+    min_value=0.0,
+    max_value=1.0,
+    value=(0.25, 0.75),
+    step=0.01,
+)
+
+cv_cutoff_quantiles = st.slider(
+    'Grenzen Koeffizient der Varianz (Quantile)',
+    min_value=0.0,
+    max_value=1.0,
+    value=(0.25, 0.75),
+    step=0.01,
+)
+
 dish_stats = compute_dish_stats(
     sales_processed=sales_processed,
     selected_academic_buckets=selected_academic_buckets,
@@ -179,7 +199,11 @@ if dish_stats.is_empty():
     st.warning('Keine Daten für die aktuelle Auswahl.')
     st.stop()
 
-dish_segments, cutoffs = add_segments(dish_stats)
+dish_segments, cutoffs = add_segments(
+    dish_stats=dish_stats,
+    sales_cutoff_quantiles=sales_cutoff_quantiles,
+    cv_cutoff_quantiles=cv_cutoff_quantiles,
+)
 
 plot_df = (
     dish_segments

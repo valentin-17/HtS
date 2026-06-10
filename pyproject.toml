@@ -5,10 +5,12 @@ requires-python = ">=3.12"
 dependencies = [
     "holidays>=0.95",
     "jupyterlab>=4.5.6",
+    "lightgbm>=4.6.0",
     "matplotlib>=3.10.9",
     "pandas>=3.0.2",
     "polars>=1.40.1",
     "scikit-learn>=1.7.0",
+    "sktime>=0.38.0",
     "statsmodels>=0.14.4",
 ]
 
